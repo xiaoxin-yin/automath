@@ -3,3 +3,5 @@ ckpt/
 calculus/ckpt/
 datasets/
 openai_api_key.txt
+__pycache__
+
