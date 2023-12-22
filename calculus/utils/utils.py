@@ -1,10 +1,23 @@
 import errno
 import os
+import math
 import signal
 import functools
 import random
 from sympy import sympify
+from sympy.functions import Abs
 
+def shrink_a_number(n):
+    if n.is_Integer and Abs(n) > 20:
+        return n // (10**math.floor(math.log10(abs(n))))
+    elif n.is_Float and Abs(n) > 20:
+        return n / (10**math.floor(math.log10(abs(n))))
+    elif n.is_Rational and Abs(n) > 20:
+        return n // (10**math.floor(math.log10(abs(n))))
+    return n
+
+# Randomize a number
+# if shrink==True, shrink the number to be within 10
 def randomize_number(n):
     if n.is_Integer:
         for i in range(10):
@@ -17,13 +30,38 @@ def randomize_number(n):
         return m
     return n
 
-def randomize(expr, prob_change=0.5):
+def random_remove_items(expr, prob_delete=0.1):
+    for i in range(10):
+        constants = [t for t in expr.atoms() if t not in expr.free_symbols]
+        mapping = {}
+        for constant in constants:
+            if random.random() < prob_delete:
+                mapping[constant] = sympify('0')
+        expr_removed = expr.subs(mapping)
+        if not expr_removed.is_constant():
+            return expr_removed
+    return expr
+
+def shrink_numbers(expr):
+    constants = [t for t in expr.atoms() if t not in expr.free_symbols]
+    mapping = {}
+    for constant in constants:
+        mapping[constant] = shrink_a_number(constant)
+    return expr.subs(mapping)
+
+def randomize(expr, prob_change=0.5, shrink=False, remove_items=False):
+    if shrink:
+        expr = shrink_numbers(expr)
     constants = [t for t in expr.atoms() if t not in expr.free_symbols]
     mapping = {}
     for constant in constants:
         if random.random() < prob_change:
             mapping[constant] = randomize_number(constant)
-    return expr.subs(mapping)
+    expr_subed = expr.subs(mapping)
+    if remove_items:
+        return random_remove_items(expr_subed)
+    else:
+        return expr_subed
 
 class TimeoutError(Exception):
     pass
