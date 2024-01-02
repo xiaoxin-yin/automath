@@ -31,6 +31,7 @@ class ModelWrapper(nn.Module):
         beam_early_stopping=True,
         max_generated_output_len=200,
         beam_temperature=1.0,
+        blacklisted_idx=[]
     ):
         super().__init__()
 
@@ -44,6 +45,7 @@ class ModelWrapper(nn.Module):
         self.beam_size = beam_size
         self.beam_length_penalty = beam_length_penalty
         self.beam_temperature = beam_temperature
+        self.blacklisted_idx=blacklisted_idx
         self.device = next(self.embedder.parameters()).device
 
     @torch.no_grad()
@@ -79,6 +81,7 @@ class ModelWrapper(nn.Module):
                 sample_temperature=None,
                 max_len=self.max_generated_output_len,
             )
+            #print("generations:", generations)
 
             generations = generations.unsqueeze(-1).view(generations.shape[0], bs, 1)
             generations = generations.transpose(0, 1).transpose(1, 2).cpu().tolist()
@@ -112,6 +115,7 @@ class ModelWrapper(nn.Module):
                     )
                     for i in range(bs)
                 ]
+                #print("search_generations:", search_generations)
                 search_generations = [
                     list(
                         filter(
@@ -152,6 +156,7 @@ class ModelWrapper(nn.Module):
                 sampling_generations = (
                     sampling_generations.transpose(0, 1).transpose(1, 2).cpu().tolist()
                 )
+                #print("sampling_generations:", sampling_generations)
                 sampling_generations = [
                     list(
                         filter(

@@ -105,6 +105,7 @@ class SymbolicTransformerRegressor(BaseEstimator):
                     inputs_ids.append(seq_id)
                 inputs[-1].append([scaled_X[seq_id][seq_l], y_seq[seq_l]])
 
+        #print(1)
         if self.max_number_bags>0:
             inputs = inputs[:self.max_number_bags]
             inputs_ids = inputs_ids[:self.max_number_bags]
@@ -113,6 +114,7 @@ class SymbolicTransformerRegressor(BaseEstimator):
         outputs = self.model(inputs)  ##Forward transformer: returns predicted functions
         if verbose: print("Finished forward in {} secs".format(time.time()-forward_time))
 
+        #print(2)
         candidates = defaultdict(list)
         assert len(inputs) == len(outputs), "Problem with inputs and outputs"
         for i in range(len(inputs)):
@@ -121,19 +123,29 @@ class SymbolicTransformerRegressor(BaseEstimator):
             candidates[input_id].extend(candidate)
         assert len(candidates.keys())==n_datasets
             
+        #print(3)
+        num_iterations = 0
         self.tree = {}
         for input_id, candidates_id in candidates.items():
+            num_iterations += 1
+            #print("iteration", num_iterations)
             if len(candidates_id)==0: 
                 self.tree[input_id]=None
                 continue
-        
+            #print(3.1)
             refined_candidates = self.refine(scaled_X[input_id], Y[input_id], candidates_id, verbose=verbose)
+            #print(3.2)
             for i,candidate in enumerate(refined_candidates):
+                #print(3.3, "iteration", i)
                 if scaler is not None:
                     refined_candidates[i]["predicted_tree"]=scaler.rescale_function(self.model.env, candidate["predicted_tree"], *scale_params[input_id])
                 else: 
                     refined_candidates[i]["predicted_tree"]=candidate["predicted_tree"]
+                #print(3.4, "iteration", i)
             self.tree[input_id] = refined_candidates
+            #print(3.5)
+        
+        #print(4)
 
     @torch.no_grad()
     def evaluate_tree(self, tree, X, y, metric):

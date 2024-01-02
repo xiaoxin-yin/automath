@@ -70,7 +70,8 @@ class Scaler(ABC):
         while idx < len(prefix):
             if prefix[idx].startswith("x_"):
                 k = int(prefix[idx][-1])
-                if k>=len(a): 
+                if k>=len(a):
+                    idx+=1
                     continue
                 a_k, b_k = str(a[k]), str(b[k])
                 prefix_to_add = ["add", b_k, "mul", a_k, prefix[idx]]

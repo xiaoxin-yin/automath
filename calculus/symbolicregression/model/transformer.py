@@ -490,6 +490,8 @@ class TransformerModel(nn.Module):
         cur_len = 1
         gen_len = src_len.clone().fill_(1)
         unfinished_sents = src_len.clone().fill_(1)
+        
+        blacklist = [41, 43, 44, 45, 46, 50, 51, 52, 59, 60, 62]
 
         # cache compute states
         self.cache = {"slen": 0}
@@ -509,6 +511,11 @@ class TransformerModel(nn.Module):
             assert tensor.size() == (1, bs, self.dim)
             tensor = tensor.data[-1, :, :].to(self.dtype)  # (bs, dim)  ##BE CAREFUL
             scores = self.proj(tensor)  # (bs, n_words)
+            for idx in blacklist:
+                scores[:, idx] = -10000.0
+            
+#             print(scores.shape)
+#             print("scores:", scores)
 
             # select next words: sample or greedy
             if sample_temperature is None:
