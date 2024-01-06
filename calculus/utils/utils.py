@@ -4,7 +4,9 @@ import math
 import signal
 import functools
 import random
-from sympy import sympify
+import sympy as sp
+import numpy as np
+from sympy import sympify, lambdify
 from sympy.functions import Abs
 from sympy.core.rules import Transform
 
@@ -70,6 +72,22 @@ def filter_non_polynomial(f):
     if len(terms_kept) == 0:
         return sympify(0)
     return sum(terms_kept)
+
+# Get the diff (as a 1-D numpy array) between two functions f and g
+def get_diff(f, g, t, min_t=-5.0, max_t=5.0, increment=0.1):
+    ts = np.arange(min_t, max_t, increment)
+    fl = lambdify((t), f, "numpy")
+    fs = fl(ts)
+    gl = lambdify((t), g, "numpy")
+    gs = gl(ts)
+    return fs, gs, fs-gs
+
+def get_avg_diff(f, g, t, min_t=-5.0, max_t=5.0, increment=0.1):
+    fs, gs, diff = get_diff(f, g, t, min_t, max_t, increment)
+    avg_f = np.mean(np.abs(fs))
+    avg_g = np.mean(np.abs(gs))
+    avg_diff = np.mean(np.abs(diff))
+    return avg_diff / max(avg_f, avg_g)
 
 def shrink_a_number(n):
     if n.is_Integer and Abs(n) > 20:
