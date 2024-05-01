@@ -1,6 +1,7 @@
 import os
 import sys
 import re
+import itertools
 
 lean_tactics = [
     "all_goals", "any_goals", "apply", "assumption", "assumption'", "cases", 
@@ -221,6 +222,34 @@ def parse_lean_state_and_tactic(state_before, tactic, custom_defs=None):
     
     return ''.join(transformed_parts)
 
+def generate_tactics_from_template(template, type_of_item):
+    items_of_type = {'unknown': [], 'variable': [], 'hypothesis': []}
+    for item, type_ in type_of_item.items():
+        items_of_type[type_].append(item)
+    # Identify the placeholders and their types
+    parts = template.split('{')
+    fixed_parts = [parts[0]]
+    types = []
+    
+    for part in parts[1:]:
+        typ, rest = part.split('}')
+        types.append(typ)
+        fixed_parts.append(rest)
+    
+    # Generate all possible combinations of replacements
+    replacement_lists = [items_of_type[typ] for typ in types]
+    combinations = itertools.product(*replacement_lists)
+    
+    # Construct the sentences with all possible combinations
+    sentences = []
+    for combination in combinations:
+        sentence = fixed_parts[0]
+        for item, fixed_part in zip(combination, fixed_parts[1:]):
+            sentence += item + fixed_part
+        sentences.append(sentence)
+    
+    return sentences
+
 
 def main() -> int:
     # Example usage
@@ -350,6 +379,22 @@ def main() -> int:
     """
     tactic = "rintro y ⟨x, ⟨xs,xt⟩, rfl⟩"
     print(parse_lean_state_and_tactic(state_before, tactic))  # should be "rw [{FnEven f}, {FnEven g}]"
+    
+    type_of_item = {
+        'a_pos': 'unknown',
+        'b_neg': 'unknown',
+        'x': 'variable',
+        'y': 'variable',
+        'h': 'hypothesis',
+        'h1': 'hypothesis'
+    }
+
+    templates = ["apply le_trans", "apply {unknown}", "intro {unknown} with [{variable}, {variable}] in {hypothesis}"]
+    for template in templates:
+        print("Template:", template)
+        tactics = generate_tactics_from_template(template, type_of_item)
+        for tactic in tactics:
+            print(tactic)
     
     return 0
 
