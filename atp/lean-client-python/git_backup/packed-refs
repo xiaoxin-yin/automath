@@ -1,9 +1,0 @@
-# pack-refs with: peeled fully-peeled sorted 
-1c9caac4dd845324d2e2a208a8c69dd3f5121d87 refs/remotes/origin/add-tests
-6e87b9d4c16049c63c2144cc7523457e3633b585 refs/remotes/origin/cmd-line-params
-18cdfc90976f9685f6099e5ce4b38032037f627d refs/remotes/origin/find-and-replace-example
-2319ac1c980a9465c8a0d1d4357516f87d790fa1 refs/remotes/origin/fix-receiver2
-59786389bf55ab1cf4dc1e984119b0b4b09e4d5e refs/remotes/origin/info-improvements
-60521a903424e81edff085a8f5bb711b57975e02 refs/remotes/origin/kill-not-async
-efeb257b7e672d02c1005a6624251ad6dd392451 refs/remotes/origin/master
-7621632c20f31632b86a1ff672ee509bea97bc92 refs/remotes/origin/refactor-commands-api
