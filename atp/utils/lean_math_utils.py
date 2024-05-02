@@ -2,6 +2,10 @@ import os
 import sys
 import re
 import itertools
+import heapq
+
+import lean_dojo
+
 
 lean_tactics = [
     "all_goals", "any_goals", "apply", "assumption", "assumption'", "cases", 
@@ -225,7 +229,8 @@ def parse_lean_state_and_tactic(state_before, tactic, custom_defs=None):
 def generate_tactics_from_template(template, type_of_item):
     items_of_type = {'unknown': [], 'variable': [], 'hypothesis': []}
     for item, type_ in type_of_item.items():
-        items_of_type[type_].append(item)
+        if type_ in items_of_type:
+            items_of_type[type_].append(item)
     # Identify the placeholders and their types
     parts = template.split('{')
     fixed_parts = [parts[0]]
@@ -249,6 +254,37 @@ def generate_tactics_from_template(template, type_of_item):
         sentences.append(sentence)
     
     return sentences
+
+class PriorityQueue:
+    def __init__(self):
+        self._queue = []
+        self._index = 0  # this index helps to compare items with the same priority
+
+    def size(self):
+        return len(self._queue)
+
+    def push(self, item, priority):
+        # The priority queue is based on a min-heap, so we use negative priority to ensure that
+        # the highest priority has the lowest number.
+        heapq.heappush(self._queue, (priority, self._index, item))
+        self._index += 1
+
+    def pop(self):
+        # Returns items with the highest priority
+        if len(self._queue) == 0:
+            return None
+        return heapq.heappop(self._queue)[-1]  # Returns only the item, discarding its priority and index
+
+
+def state_complexity(state):
+    complexity = 0
+    lines = state.pp.split('\n')
+    for line in lines:
+        if line.startswith("⊢"):
+            complexity += len(line[1:].strip())
+    return complexity
+
+
 
 
 def main() -> int:
