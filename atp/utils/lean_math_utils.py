@@ -279,10 +279,12 @@ class PriorityQueue:
 def state_complexity(state):
     complexity = 0
     lines = state.pp.split('\n')
+    n_targets = 0
     for line in lines:
         if line.startswith("⊢"):
-            complexity += len(line[1:].strip())
-    return complexity
+            complexity = max(complexity, len(line[1:].strip()))
+            n_targets += 1
+    return complexity + n_targets - 1
 
 
 
