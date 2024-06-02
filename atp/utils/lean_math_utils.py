@@ -206,8 +206,9 @@ def parse_lean_state_and_tactic(state_before, tactic, custom_defs=None):
     command = None
     transformed_parts = []
     new_var_idx = 0
+    while 'nvar' + str(new_var_idx) in tactic_parts:
+        new_var_idx += 1
     for tp in tactic_parts:
-        
         if tp in definition_dict:
             transformed_parts.append('{' + definition_dict[tp] + '}')
         elif custom_defs is not None and tp in custom_defs:
@@ -231,6 +232,19 @@ def generate_tactics_from_template(template, type_of_item):
     for item, type_ in type_of_item.items():
         if type_ in items_of_type:
             items_of_type[type_].append(item)
+            
+    # Replace {nvar*} with nvar*
+    existing_new_var_indices = [x for x in range(32) if 'nvar'+str(x) in type_of_item]
+    if len(existing_new_var_indices) == 0:
+        additional_new_var_idx = 0
+    else:
+        additional_new_var_idx = max(existing_new_var_indices) + 1
+    for new_var_idx in range(32):
+        tmp = '{nvar' + str(new_var_idx) + '}'
+        if tmp in template:
+            template = template.replace(tmp, 'nvar' + str(additional_new_var_idx))
+            additional_new_var_idx += 1
+        
     # Identify the placeholders and their types
     parts = template.split('{')
     fixed_parts = [parts[0]]
@@ -424,15 +438,27 @@ def main() -> int:
         'x': 'variable',
         'y': 'variable',
         'h': 'hypothesis',
-        'h1': 'hypothesis'
+        'h1': 'hypothesis',
+        'nvar1': 'hypothesis'
     }
 
-    templates = ["apply le_trans", "apply {unknown}", "intro {unknown} with [{variable}, {variable}] in {hypothesis}"]
+    templates = ["apply le_trans", "apply {unknown}", "intro {variable} {nvar0}", "intro {unknown} with [{variable}, {variable}] in {hypothesis}"]
     for template in templates:
         print("Template:", template)
         tactics = generate_tactics_from_template(template, type_of_item)
-        for tactic in tactics:
-            print(tactic)
+        if template == 'apply le_trans':
+            assert len(tactics) == 1
+            assert tactics[0] == 'apply le_trans'
+        elif template == 'apply {unknown}':
+            assert len(tactics) == 2
+            assert tactics[0] == 'apply a_pos'
+            assert tactics[1] == 'apply b_neg'
+        elif template == 'intro {variable} {nvar0}':
+            assert len(tactics) == 2
+            assert tactics[0] == 'intro x nvar2'
+            assert tactics[1] == 'intro y nvar2'
+        elif template == "intro {unknown} with [{variable}, {variable}] in {hypothesis}":
+            assert len(tactics) == 24
     
     return 0
 
