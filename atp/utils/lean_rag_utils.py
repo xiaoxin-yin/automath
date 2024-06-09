@@ -33,6 +33,10 @@ from lean_dojo.interaction.dojo import (
 
 
 MAX_MEMORY_USAGE = 16*1024*1024*1024
+MAX_STEPS = 100000
+MAX_TACTIC_FROM_TEMPLATE = 50
+PENALTY_SEEN_TARGET_MULTIPLIER = 3
+MAX_NUM_DOJO_ATTEMPT = 2
 
 
 class TripletDataset(Dataset):
@@ -87,21 +91,6 @@ def get_similar_tacs(query_string, model_state, tokenizer, faiss_index, all_tacs
         if verbose:
             print(f"{i+1}. {all_tacs[idx]} (similarity: {similarity})")
     return sorted(output, key=lambda item: item[1], reverse=True)
-
-
-
-
-MAX_STEPS = 100000
-MAX_TACTIC_FROM_TEMPLATE = 50
-PENALTY_SEEN_TARGET_MULTIPLIER = 3
-MAX_NUM_DOJO_ATTEMPT = 2
-
-#theorem = Theorem(repo, "MIL/C02_Basics/solutions/Solutions_S05_Proving_Facts_about_Algebraic_Structures.lean",
-#                  "Solutions_S05_Proving_Facts_about_Algebraic_Structures_ex1")
-# theorem = Theorem(repo, "MIL/C02_Basics/solutions/Solutions_S01_Calculating.lean",
-#                   "Solutions_S01_Calculating_ex2")
-#theorem = Theorem(repo, "MIL/C02_Basics/solutions/Solutions_S04_More_on_Order_and_Divisibility.lean",
-#                  "C02S04.Solutions_S04_More_on_Order_and_Divisibility_ex7")
 
 
 # The complexity of a state if calculated from lengths of its targets
@@ -168,7 +157,9 @@ def dojo_run_tac(dojo, state, tactic):
     return result
 
 #@profile
-def explore_states(theorem,
+def explore_states(dojo,
+                   state_0,
+                   theorem,
                    model_state,
                    tokenizer,
                    rag_index,
@@ -176,18 +167,10 @@ def explore_states(theorem,
                    theorem_code,
                    traced_tactics=None,
                    max_steps=MAX_STEPS, 
-                   max_time=1200, 
-                   exit_on_finish=True, 
+                   max_time=1800, 
+                   exit_on_finish=True,
                    verbose=False):
     start_time = time.time()
-    # For some theorems, it might take a few minutes.
-    try:
-        print("Start entering", theorem)
-        dojo, state_0 = Dojo(theorem).__enter__()
-        print("Finish entering", theorem)
-    except lean_dojo.interaction.dojo.DojoInitError:
-        print("DojoInitError")
-        return {}, False, None
 
     #if verbose: print(state_0.pp)
     unused_vars = []
@@ -370,7 +353,9 @@ def yield_state_pairs(curr_state, leaf_state, state_dict, seen_states_pp, tactic
     return
 
 
-def get_state_provability_data(theorem,
+def get_state_provability_data(dojo,
+                               state_0,
+                               theorem,
                                model_state,
                                tokenizer,
                                rag_index, 
@@ -378,10 +363,12 @@ def get_state_provability_data(theorem,
                                theorem_code=None, 
                                traced_tactics=None,
                                max_steps=100000, 
-                               negative_ratio=1.0, 
+                               negative_ratio=1.0,
                                verbose=False):
     state_dict, theorem_proven, tactic_trace = \
-    explore_states(theorem,
+    explore_states(dojo,
+                   state_0,
+                   theorem,
                    model_state,
                    tokenizer,
                    rag_index, 
@@ -465,54 +452,82 @@ def split_path(file_path):
     return parts
 
 
-def compute_provability_training_data(repo,
-                                      file_path,
-                                      output_path,
-                                      traced_file_theorems,
-                                      model_state,
-                                      tokenizer,
-                                      index,
-                                      tacs
-                                      ):
-    file_name = get_filename(file_path)
-    parts = split_path(file_path)
-    output_file_name = '__'.join(parts[2:])
-    fout = open(output_path + output_file_name + '.pkl', 'wb')
-    traced_theorems = traced_file_theorems[file_path]
-    #
-    results = []
-    num_theorems_processed = 0
-    for full_name, thm in traced_theorems.items():
-        #theorem = thm.theorem
-        theorem_code = thm.comments[0]
-        #print('Start Loading Theorem:', full_name, theorem_code)
-        theorem = Theorem(repo, file_path, full_name)
-        #print('Finish Loading Theorem:', full_name, theorem_code)
-        traced_tactics = thm.get_traced_tactics()
-        state_pairs, _ = \
-            get_state_provability_data(theorem,
-                                       model_state,
-                                       tokenizer,
-                                       index,
-                                       tacs,
-                                       theorem_code=theorem_code,
-                                       traced_tactics=traced_tactics,
-                                       max_steps=50000,
-                                       verbose=True)
-        print(len(state_pairs), "state pairs found in", full_name, file_path)
-        #
-        for state_pair in state_pairs:
-            result = (file_path, full_name, theorem, state_pair)
-            results.append(result)
-            pickle.dump(result, fout)
-        num_theorems_processed += 1
-        if num_theorems_processed >= 5:
-            break
-    #
-    fout.close()
-    return len(results)
+# Ray code
 
-@ray.remote(num_cpus=1,num_gpus=0.1)
+# @ray.remote
+# class Semaphore:
+#     def __init__(self, num_tokens):
+#         self.available_tokens = num_tokens
+#         self.wait_queue = []
+
+#     def acquire(self):
+#         # Wait until a token is available
+#         while self.available_tokens == 0:
+#             time.sleep(0.1)  # Sleep to prevent busy waiting
+#         self.available_tokens -= 1
+
+#     def release(self):
+#         self.available_tokens += 1
+
+
+# import fcntl, hashlib
+
+# class SystemMutex:
+#     def __init__(self, name):
+#         self.name = name
+
+#     def __enter__(self):
+#         lock_id = hashlib.md5(self.name.encode('utf8')).hexdigest()
+#         self.fp = open(f'/tmp/.lock-{lock_id}.lck', 'wb')
+#         fcntl.flock(self.fp.fileno(), fcntl.LOCK_EX)
+
+#     def __exit__(self, _type, value, tb):
+#         fcntl.flock(self.fp.fileno(), fcntl.LOCK_UN)
+#         self.fp.close()
+
+# import posix_ipc
+
+# class SystemSemaphore:
+#     def __init__(self, name, limit):
+#         self.name = name
+#         self.limit = limit
+
+#     def __enter__(self):
+#         self.lock = posix_ipc.Semaphore(f'/{self.name}', posix_ipc.O_CREAT, 0x384, self.limit)
+#         self.lock.acquire()
+
+#     def __exit__(self, _type, value, tb):
+#         self.lock.release()
+        
+import posix_ipc
+import time
+import threading
+
+class SystemSemaphore:
+    def __init__(self, name, limit, max_hold_time=240):
+        self.name = name
+        self.limit = limit
+        self.max_hold_time = max_hold_time
+
+    def __enter__(self):
+        self.lock = posix_ipc.Semaphore(f'/{self.name}', posix_ipc.O_CREAT, 0x384, self.limit)
+        self.lock.acquire()
+        self.start_time = time.time()
+        self.timer = threading.Timer(self.max_hold_time, self.release_semaphore)
+        self.timer.start()
+
+    def __exit__(self, _type, value, tb):
+        self.timer.cancel()
+        self.release_semaphore()
+
+    def release_semaphore(self):
+        elapsed_time = time.time() - self.start_time
+        if elapsed_time > self.max_hold_time:
+            print(f"Warning: Semaphore was held for {elapsed_time:.2f} seconds, exceeding the maximum hold time of {self.max_hold_time} seconds.")
+        self.lock.release()
+
+
+@ray.remote(num_cpus=1,num_gpus=0.1,timeout=2000)
 def compute_provability_training_data_remote(file_path, output_path):
     worker_id = random.randint(0, 100)
     print("Worker", worker_id, "on", file_path)
@@ -546,14 +561,79 @@ def compute_provability_training_data_remote(file_path, output_path):
     tacs = list(tac_template_freq.keys())
     #
     print("Worker", worker_id, "Computing provability ...")
-    compute_provability_training_data(repo,
-                                      file_path,
-                                      output_path,
-                                      train_traced_theorems,
-                                      model_state,
-                                      tokenizer,
-                                      index,
-                                      tacs)
+    #     compute_provability_training_data(repo,
+    #                                       file_path,
+    #                                       output_path,
+    #                                       train_traced_theorems,
+    #                                       model_state,
+    #                                       tokenizer,
+    #                                       index,
+    #                                       tacs,
+    #                                       
+    #      )
+    file_name = get_filename(file_path)
+    parts = split_path(file_path)
+    output_file_name = '__'.join(parts[2:])
+    fout = open(output_path + output_file_name + '.pkl', 'wb')
+    traced_theorems = train_traced_theorems[file_path]
+    #
+    results = []
+    num_theorems_processed = 0
+    for full_name, thm in traced_theorems.items():
+        #theorem = thm.theorem
+        theorem_code = thm.comments[0]
+        #print('Start Loading Theorem:', full_name, theorem_code)
+        theorem = Theorem(repo, file_path, full_name)
+        #print('Finish Loading Theorem:', full_name, theorem_code)
+        traced_tactics = thm.get_traced_tactics()
+        #print("Trying to acquire semaphore for", theorem)
+        #ray.get(semaphore_dojo_enter.acquire.remote())  # Ensuring semaphore is acquired
+        # Getting Dojo and state_0
+        # For some theorems, it might take a few minutes.
+        print("Worker", worker_id, "trying to get into critical section")
+        with SystemSemaphore('dojo-enter', 1):
+            print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
+            entered = False
+            try:
+                print("Start entering", theorem)
+                dojo, state_0 = Dojo(theorem).__enter__()
+                entered = True
+                print("Finish entering", theorem)
+            except lean_dojo.interaction.dojo.DojoInitError:
+                print("DojoInitError")
+            #finally:
+            #    semaphore_dojo_enter.release.remote()
+            #
+        if not entered:
+            print("Failed to enter", theorem)
+            continue
+        # The main computation
+        state_pairs, _ = \
+            get_state_provability_data(dojo,
+                                       state_0,
+                                       theorem,
+                                       model_state,
+                                       tokenizer,
+                                       index,
+                                       tacs,
+                                       theorem_code=theorem_code,
+                                       traced_tactics=traced_tactics,
+                                       max_steps=200000,
+                                       verbose=True)
+        print(len(state_pairs), "state pairs found in", full_name, file_path)
+        #
+        for state_pair in state_pairs:
+            result = (file_path, full_name, theorem, state_pair)
+            results.append(result)
+            pickle.dump(result, fout)
+        num_theorems_processed += 1
+#         if num_theorems_processed >= 5:
+#             break
+    #
+    fout.close()
+    return len(results)
+
+
 
 def main() -> int:
     fin = open('/home/mcwave/code/automath/atp/datasets/tac_templates_in_files/train_tac_templates.json', 'r')
@@ -576,10 +656,12 @@ def main() -> int:
     # Start Ray with custom configuration
     ray.init(
         num_gpus=1,
-        num_cpus=8,
+        num_cpus=10,
         _memory=(192 * 1024 * 1024 * 1024),  # For example, limit Ray to 4 GB of RAM
-        object_store_memory=(20 * 1024 * 1024 * 1024)  # Set object store memory to 2 GB
+        object_store_memory=(19 * 1024 * 1024 * 1024)  # Set object store memory to 2 GB
     )
+    # Only one process can run Dojo(theorem).__enter__ at a time.
+    #semaphore_dojo_enter = Semaphore.remote(1)
     #
     # all_file_paths = [
     #     "MIL/C02_Basics/solutions/Solutions_S01_Calculating.lean",
