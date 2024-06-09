@@ -1,15 +1,39 @@
 import os
+import lean_dojo
 from lean_dojo import *
 from utils.lean_math_utils import *
-import lean_dojo
 from random import randint
+import errno
+import functools
+import signal
 import time
-
+import ray
+import json
+import faiss
+import subprocess
+import shutil
+import psutil
 import pickle
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import BertTokenizer, BertModel
+#from memory_profiler import profile
+
+from lean_dojo.interaction.dojo import (
+    LeanError,
+    TimeoutError,
+    TacticResult,
+    DojoCrashError,
+    DojoHardTimeoutError,
+    DojoInitError,
+    ProofGivenUp,
+    ProofFinished,
+)
+
+
+MAX_MEMORY_USAGE = 16*1024*1024*1024
+
 
 class TripletDataset(Dataset):
     def __init__(self, triplets, tokenizer):
@@ -70,7 +94,7 @@ def get_similar_tacs(query_string, model_state, tokenizer, faiss_index, all_tacs
 MAX_STEPS = 100000
 MAX_TACTIC_FROM_TEMPLATE = 50
 PENALTY_SEEN_TARGET_MULTIPLIER = 3
-MAX_NUM_DOJO_ATTEMPT = 3
+MAX_NUM_DOJO_ATTEMPT = 2
 
 #theorem = Theorem(repo, "MIL/C02_Basics/solutions/Solutions_S05_Proving_Facts_about_Algebraic_Structures.lean",
 #                  "Solutions_S05_Proving_Facts_about_Algebraic_Structures_ex1")
@@ -118,7 +142,32 @@ def get_tactic_trace(curr_state, state_dict):
         return []
     else:
         return get_tactic_trace(parent_states[0], state_dict) + [(tactics[0], curr_state)]
+    
+# Create the inverse tactic for a 'rw' tactic template
+def get_inverse_tactic(tac_template):
+    if not tac_template.startswith('rw') or not '[' in tac_template \
+        or '←' in tac_template or '[{' in tac_template:
+        return None
+    result = tac_template.replace('[', '[← ')
+    if ',' in result:
+        pos = result.find(',')
+        result = result[0:pos] + ']'
+    return result
 
+@timeout(1)
+def dojo_run_tac(dojo, state, tactic):
+    #     # Get the current process object
+    #     process = psutil.Process(os.getpid())
+    #     # Memory info (in bytes)
+    #     mem_info = process.memory_info()
+    #     # Print the RSS (Resident Set Size): total physical memory used
+    #     print(f"Current memory RSS usage: {mem_info.rss / (1024 ** 2):.2f} MB", randint(0,100), end="")
+    #print("Run tac", end="")
+    result = dojo.run_tac(state, tactic)
+    #print("Done")
+    return result
+
+#@profile
 def explore_states(theorem,
                    model_state,
                    tokenizer,
@@ -132,7 +181,13 @@ def explore_states(theorem,
                    verbose=False):
     start_time = time.time()
     # For some theorems, it might take a few minutes.
-    dojo, state_0 = Dojo(theorem).__enter__()
+    try:
+        print("Start entering", theorem)
+        dojo, state_0 = Dojo(theorem).__enter__()
+        print("Finish entering", theorem)
+    except lean_dojo.interaction.dojo.DojoInitError:
+        print("DojoInitError")
+        return {}, False, None
 
     #if verbose: print(state_0.pp)
     unused_vars = []
@@ -156,8 +211,11 @@ def explore_states(theorem,
     if traced_tactics is not None:
         for traced_tactic in traced_tactics:
             tactic = traced_tactic.tactic
-            test_state = dojo.run_tac(curr_state, tactic)
-            if type(test_state) == lean_dojo.interaction.dojo.LeanError:
+            try:
+                test_state = dojo_run_tac(dojo, curr_state, tactic)
+            except:
+                break
+            if type(test_state) in [LeanError,TimeoutError,TacticResult,DojoCrashError,DojoHardTimeoutError,DojoInitError,ProofGivenUp]:
                 break
             elif type(test_state) == lean_dojo.interaction.dojo.ProofFinished:
                 state_dict[test_state] = (test_state, [curr_state], [tactic])
@@ -184,7 +242,6 @@ def explore_states(theorem,
             if n_steps == 0:
                 print("INIT_STATE:", curr_state.pp)
                 print(type_of_item)
-                #print(def_of_item)
         #
         #TODO: Add {'nvar0': 'nvar0', 'nvar1': 'nvar1', ...} to type_of_item
         #
@@ -192,6 +249,14 @@ def explore_states(theorem,
         query = theorem_code + ' # ' + curr_state.pp
         suggestions = get_similar_tacs(query, model_state, tokenizer, rag_index, all_tacs, num_returned=200)
         tac_templates = [x[0] for x in suggestions]
+        #
+        # Add inverse tactics of any 'rw' tactics in the set
+        inv_tac_templates = []
+        for tac_template in tac_templates:
+            inv_template = get_inverse_tactic(tac_template)
+            if inv_template is not None and inv_template not in tac_templates:
+                tac_templates.append(inv_template)
+        #
         for tac_template in tac_templates:
             try:
                 tactics = generate_tactics_from_template(tac_template, type_of_item)
@@ -208,22 +273,22 @@ def explore_states(theorem,
         #print(len(tactic_set), "tactics")
         #print(tactic_set)
         for tactic in tactic_set:
-            num_attempt = 0
-            while num_attempt < MAX_NUM_DOJO_ATTEMPT:
-                try:
-                    test_state = dojo.run_tac(curr_state, tactic)
-                    break
-                except:
-                    num_attempt += 1
-            if num_attempt == MAX_NUM_DOJO_ATTEMPT:
-                continue
-            #print("TRY TAC:", tactic)
             n_steps += 1
             if n_steps % 10000 == 0:
                 print(n_steps, "steps executed")
             if n_steps > max_steps:
                 break
-            if type(test_state) == lean_dojo.interaction.dojo.LeanError:
+            num_attempt = 0
+            while num_attempt < MAX_NUM_DOJO_ATTEMPT:
+                try:
+                    test_state = dojo_run_tac(dojo, curr_state, tactic)
+                    break
+                except Exception as e:
+                    num_attempt += 1
+            if num_attempt == MAX_NUM_DOJO_ATTEMPT:
+                continue
+            #print("TRY TAC:", tactic)
+            if type(test_state) in [LeanError,TimeoutError,TacticResult,DojoCrashError,DojoHardTimeoutError,DojoInitError,ProofGivenUp]:
                 continue
             elif type(test_state) == lean_dojo.interaction.dojo.ProofFinished:
                 proof_finished = True
@@ -267,6 +332,11 @@ def explore_states(theorem,
             break
     #
     dojo.__exit__(None, None, None)
+    try:
+        shutil.rmtree(dojo.tmp_dir)
+        print(dojo.tmp_dir, "removed successfully.")
+    except Exception as e:
+        print(f"An error occurred when removing tmp dir: {e}")
     return state_dict, theorem_proven, tactic_trace
 
 # Generate state pairs and their distances. 
@@ -330,7 +400,7 @@ def get_state_provability_data(theorem,
     seen_state_pps = set()
     #
     for proven_state in proven_states:
-        print(proven_state)
+        #print(proven_state)
         pairs = list(yield_state_pairs(proven_state, proven_state, state_dict, [str(proven_state)], []))
         ancestor_state_dict = {}
         for ancestor, leaf, distance, tactic in pairs:
@@ -340,20 +410,22 @@ def get_state_provability_data(theorem,
                 if distance < ancestor_state_dist[ancestor]:
                     ancestor_state_dict[ancestor] = (distance, tactic)
         #print(ancestor_state_dist)
-        print(len(ancestor_state_dict), "ancestors found")
+        #print(len(ancestor_state_dict), "ancestors found")
         for ancestor, (distance, tactic) in ancestor_state_dict.items():
             state_pairs.append((ancestor, proven_state, distance, tactic))
             seen_state_pps.add(ancestor.pp)
     #
     num_positive = len(state_pairs)
-    num_negative = 0
-    for tup in all_states:
-        state = tup[0]
-        if hasattr(state, 'pp') and state.pp not in seen_state_pps:
-            state_pairs.append((state, random.choice(proven_states), -1, None))
-            num_negative += 1
-            if num_negative >= num_positive * negative_ratio:
-                break
+    # Add negative examples
+    if num_positive > 0:
+        num_negative = 0
+        for tup in all_states:
+            state = tup[0]
+            if hasattr(state, 'pp') and state.pp not in seen_state_pps:
+                state_pairs.append((state, random.choice(proven_states), -1, None))
+                num_negative += 1
+                if num_negative >= num_positive * negative_ratio:
+                    break
     return state_pairs, state_dict
 
 
@@ -364,47 +436,172 @@ def get_filename(filepath):
     file_name_without_extension = os.path.splitext(base_name)[0]
     return file_name_without_extension
 
+def split_path(file_path):
+    """
+    Splits a given file path into its individual components (directories and file name).
 
-def compute_provability_training_data(file_path,
+    Args:
+    file_path (str): The file path to split.
+
+    Returns:
+    list: A list of strings, each being a folder or file name in the path.
+    """
+    # Initialize an empty list to store path components
+    parts = []
+
+    # Keep splitting the path until there are no more directories left
+    while True:
+        parts.append(os.path.basename(file_path))
+        file_path = os.path.dirname(file_path)
+
+        # If the dirname is the same as the input, break the loop
+        if file_path == os.path.dirname(file_path):
+            if file_path:  # To avoid appending an empty string for root path
+                parts.append(file_path)
+            break
+
+    # Since we've constructed the list from the file up to the root, reverse it
+    parts.reverse()
+    return parts
+
+
+def compute_provability_training_data(repo,
+                                      file_path,
                                       output_path,
-                                      traced_repo,
+                                      traced_file_theorems,
                                       model_state,
                                       tokenizer,
                                       index,
                                       tacs
                                       ):
     file_name = get_filename(file_path)
-    fout = open(output_path + file_name + '.pkl', 'wb')
-    traced_file = traced_repo.get_traced_file(file_path)
-    premises = traced_file.get_premise_definitions()
+    parts = split_path(file_path)
+    output_file_name = '__'.join(parts[2:])
+    fout = open(output_path + output_file_name + '.pkl', 'wb')
+    traced_theorems = traced_file_theorems[file_path]
     #
     results = []
-    for premise in premises:
-        if premise['code'].startswith('theorem '):
-            print('THEOREM:', premise['full_name'])
-            print(premise['code'])
-            thm = traced_file.get_traced_theorem(premise['full_name'])
-            theorem = thm.theorem
-            traced_tactics = thm.get_traced_tactics()
-            print("theorem loaded")
-            state_pairs, _ = \
-                get_state_provability_data(theorem,
-                                           model_state,
-                                           tokenizer,
-                                           index,
-                                           tacs,
-                                           theorem_code=premise['code'],
-                                           traced_tactics=traced_tactics,
-                                           max_steps=50000,
-                                           verbose=True)
-            print(len(state_pairs), "state pairs found")
-            #
-            for state_pair in state_pairs:
-                result = (file_path, premise, theorem, state_pair)
-                results.append(result)
-                pickle.dump(result, fout)
+    num_theorems_processed = 0
+    for full_name, thm in traced_theorems.items():
+        #theorem = thm.theorem
+        theorem_code = thm.comments[0]
+        #print('Start Loading Theorem:', full_name, theorem_code)
+        theorem = Theorem(repo, file_path, full_name)
+        #print('Finish Loading Theorem:', full_name, theorem_code)
+        traced_tactics = thm.get_traced_tactics()
+        state_pairs, _ = \
+            get_state_provability_data(theorem,
+                                       model_state,
+                                       tokenizer,
+                                       index,
+                                       tacs,
+                                       theorem_code=theorem_code,
+                                       traced_tactics=traced_tactics,
+                                       max_steps=50000,
+                                       verbose=True)
+        print(len(state_pairs), "state pairs found in", full_name, file_path)
+        #
+        for state_pair in state_pairs:
+            result = (file_path, full_name, theorem, state_pair)
+            results.append(result)
+            pickle.dump(result, fout)
+        num_theorems_processed += 1
+        if num_theorems_processed >= 5:
+            break
     #
     fout.close()
     return len(results)
+
+@ray.remote(num_cpus=1,num_gpus=0.1)
+def compute_provability_training_data_remote(file_path, output_path):
+    worker_id = random.randint(0, 100)
+    print("Worker", worker_id, "on", file_path)
+    cuda_version = subprocess.run(['nvcc', '--version'], capture_output=True, text=True).stdout
+    print(cuda_version)
+    print("CUDA:", torch.cuda.is_available())
+    print("os.environ['LD_LIBRARY_PATH']", os.environ['LD_LIBRARY_PATH'])
+    print("Worker", worker_id, "Loading repo...")
+    repo = LeanGitRepo(
+        "https://github.com/xiaoxin-yin/math-in-lean",
+        "20077bcd4392317ddb9605404fda3a85e40e8956"
+    )
+    fin = open('/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl', 'rb')
+    train_traced_theorems = pickle.load(fin)
+    fin.close()
+    print("Worker", worker_id, "Done.")
+    #
+    print("Worker", worker_id, "Loading models...")
+    # Load pre-trained BERT tokenizer and model
+    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+    model_state = torch.load('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/bert_embeder_state-batch64-60k-loss0047.model')
+    #model_tac   = torch.load('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/bert_embeder_tac-batch64-60k-loss0047.model')
+    device = model_state.device
+    print(device)
+    #
+    print("Worker", worker_id, "Loading faiss index ...")
+    index = faiss.read_index('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/faiss_index_bert_embeds-batch64-60k-loss0047.idx')
+    fin = open('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/tac_template_freq.json', 'r')
+    tac_template_freq = json.load(fin)
+    fin.close()
+    tacs = list(tac_template_freq.keys())
+    #
+    print("Worker", worker_id, "Computing provability ...")
+    compute_provability_training_data(repo,
+                                      file_path,
+                                      output_path,
+                                      train_traced_theorems,
+                                      model_state,
+                                      tokenizer,
+                                      index,
+                                      tacs)
+
+def main() -> int:
+    fin = open('/home/mcwave/code/automath/atp/datasets/tac_templates_in_files/train_tac_templates.json', 'r')
+    train_tac_templates = json.load(fin)
+    fin.close()
     
- 
+    output_folder = '/home/mcwave/code/automath/atp/datasets/provability/rag/'
+    #compute_provability_training_data_remote('.lake/packages/mathlib/Mathlib/Topology/Algebra/Module/Basic.lean', output_folder)
+    
+    all_file_paths = list(set([x[-1] for x in train_tac_templates]))
+    #all_file_paths = ['.lake/packages/mathlib/Mathlib/Topology/Algebra/Module/Basic.lean']
+    #
+    # Set the environment variable to disable log deduplication
+    os.environ['RAY_record_all_task_output'] = '1'
+    #os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+    # Ensure Ray is not already initialized
+    if ray.is_initialized():
+        ray.shutdown()
+    #
+    # Start Ray with custom configuration
+    ray.init(
+        num_gpus=1,
+        num_cpus=8,
+        _memory=(192 * 1024 * 1024 * 1024),  # For example, limit Ray to 4 GB of RAM
+        object_store_memory=(20 * 1024 * 1024 * 1024)  # Set object store memory to 2 GB
+    )
+    #
+    # all_file_paths = [
+    #     "MIL/C02_Basics/solutions/Solutions_S01_Calculating.lean",
+    #     "MIL/C02_Basics/solutions/Solutions_S02_Proving_Identities_in_Algebraic_Structures.lean",
+    #     "MIL/C02_Basics/solutions/Solutions_S03_Using_Theorems_and_Lemmas.lean",
+    #     "MIL/C02_Basics/solutions/Solutions_S04_More_on_Order_and_Divisibility.lean",
+    #     "MIL/C02_Basics/solutions/Solutions_S05_Proving_Facts_about_Algebraic_Structures.lean"
+    # ]
+    output_folder = '/home/mcwave/code/automath/atp/datasets/provability/rag/'
+
+    # Submit tasks
+    result_ids = [compute_provability_training_data_remote.remote(file_path, output_folder) for file_path in all_file_paths]
+
+    # Fetch results
+    results = ray.get(result_ids)
+
+    # Optionally, shut down Ray if you're done with all computations
+    ray.shutdown()
+
+    # Display results
+    print(results)
+
+
+if __name__ == '__main__':
+    sys.exit(main())  # next section explains the use of sys.exit

@@ -3,6 +3,10 @@ import sys
 import re
 import itertools
 import heapq
+import errno
+import functools
+import signal
+import time
 
 import lean_dojo
 
@@ -45,6 +49,27 @@ lean_keywords = [
 
 
 VARIABLE_PATTERN = r'[a-zA-Z_\'\u03b1-\u03c9][a-zA-Z_\'\u03b1-\u03c9\d₀-₉]*'
+
+
+class TimeoutError(Exception):
+    pass
+
+def timeout(seconds=1, error_message=os.strerror(errno.ETIME)):
+    def decorator(func):
+        def _handle_timeout(signum, frame):
+            raise TimeoutError(error_message)
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            signal.signal(signal.SIGALRM, _handle_timeout)
+            signal.alarm(seconds)
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                signal.alarm(0)
+            return result
+        return wrapper
+    return decorator
+
 
 def parse_lean_definition(lean_code):
     # Regular expression to capture the name, signature, and content
@@ -227,6 +252,7 @@ def parse_lean_state_and_tactic(state_before, tactic, custom_defs=None):
     
     return ''.join(transformed_parts)
 
+@timeout(1)
 def generate_tactics_from_template(template, type_of_item):
     items_of_type = {'unknown': [], 'variable': [], 'hypothesis': []}
     for item, type_ in type_of_item.items():
@@ -257,6 +283,7 @@ def generate_tactics_from_template(template, type_of_item):
     
     # Generate all possible combinations of replacements
     replacement_lists = [items_of_type[typ] for typ in types]
+    #print(replacement_lists)
     combinations = itertools.product(*replacement_lists)
     
     # Construct the sentences with all possible combinations
