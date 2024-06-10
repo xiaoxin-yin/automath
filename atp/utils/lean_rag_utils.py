@@ -3,6 +3,7 @@ import lean_dojo
 from lean_dojo import *
 from utils.lean_math_utils import *
 from random import randint
+import random
 import errno
 import functools
 import signal
@@ -167,7 +168,7 @@ def explore_states(dojo,
                    theorem_code,
                    traced_tactics=None,
                    max_steps=MAX_STEPS, 
-                   max_time=1800, 
+                   max_time=1200, 
                    exit_on_finish=True,
                    verbose=False):
     start_time = time.time()
@@ -324,9 +325,6 @@ def explore_states(dojo,
 
 # Generate state pairs and their distances. 
 # Probably useful if we hope to generate intermediate states (e.g., "have").
-
-import random
-
 def yield_state_pairs(curr_state, leaf_state, state_dict, seen_states_pp, tactic_list, max_distance=8, max_parents=10):
     #     print("curr_state:", curr_state.pp)
     #     print("leaf_state:", leaf_state.pp)
@@ -352,7 +350,7 @@ def yield_state_pairs(curr_state, leaf_state, state_dict, seen_states_pp, tactic
                     break
     return
 
-
+@timeout(1800)
 def get_state_provability_data(dojo,
                                state_0,
                                theorem,
@@ -450,54 +448,6 @@ def split_path(file_path):
     # Since we've constructed the list from the file up to the root, reverse it
     parts.reverse()
     return parts
-
-
-# Ray code
-
-# @ray.remote
-# class Semaphore:
-#     def __init__(self, num_tokens):
-#         self.available_tokens = num_tokens
-#         self.wait_queue = []
-
-#     def acquire(self):
-#         # Wait until a token is available
-#         while self.available_tokens == 0:
-#             time.sleep(0.1)  # Sleep to prevent busy waiting
-#         self.available_tokens -= 1
-
-#     def release(self):
-#         self.available_tokens += 1
-
-
-# import fcntl, hashlib
-
-# class SystemMutex:
-#     def __init__(self, name):
-#         self.name = name
-
-#     def __enter__(self):
-#         lock_id = hashlib.md5(self.name.encode('utf8')).hexdigest()
-#         self.fp = open(f'/tmp/.lock-{lock_id}.lck', 'wb')
-#         fcntl.flock(self.fp.fileno(), fcntl.LOCK_EX)
-
-#     def __exit__(self, _type, value, tb):
-#         fcntl.flock(self.fp.fileno(), fcntl.LOCK_UN)
-#         self.fp.close()
-
-# import posix_ipc
-
-# class SystemSemaphore:
-#     def __init__(self, name, limit):
-#         self.name = name
-#         self.limit = limit
-
-#     def __enter__(self):
-#         self.lock = posix_ipc.Semaphore(f'/{self.name}', posix_ipc.O_CREAT, 0x384, self.limit)
-#         self.lock.acquire()
-
-#     def __exit__(self, _type, value, tb):
-#         self.lock.release()
         
 import posix_ipc
 import time
@@ -509,6 +459,7 @@ class SystemSemaphore:
         self.limit = limit
         self.max_hold_time = max_hold_time
 
+    @timeout(1200)
     def __enter__(self):
         self.lock = posix_ipc.Semaphore(f'/{self.name}', posix_ipc.O_CREAT, 0x384, self.limit)
         self.lock.acquire()
@@ -521,13 +472,14 @@ class SystemSemaphore:
         self.release_semaphore()
 
     def release_semaphore(self):
-        elapsed_time = time.time() - self.start_time
-        if elapsed_time > self.max_hold_time:
-            print(f"Warning: Semaphore was held for {elapsed_time:.2f} seconds, exceeding the maximum hold time of {self.max_hold_time} seconds.")
         self.lock.release()
+        elapsed_time = time.time() - self.start_time
+        print(f"Warning: Semaphore was held for {elapsed_time:.2f} seconds, exceeding the maximum hold time of {self.max_hold_time} seconds.")
+        raise TimeoutError(os.strerror(errno.ETIME))
+        
 
 
-@ray.remote(num_cpus=1,num_gpus=0.1,timeout=2000)
+@ray.remote(num_cpus=1,num_gpus=0.1)
 def compute_provability_training_data_remote(file_path, output_path):
     worker_id = random.randint(0, 100)
     print("Worker", worker_id, "on", file_path)
@@ -586,27 +538,27 @@ def compute_provability_training_data_remote(file_path, output_path):
         theorem = Theorem(repo, file_path, full_name)
         #print('Finish Loading Theorem:', full_name, theorem_code)
         traced_tactics = thm.get_traced_tactics()
-        #print("Trying to acquire semaphore for", theorem)
-        #ray.get(semaphore_dojo_enter.acquire.remote())  # Ensuring semaphore is acquired
+        #
         # Getting Dojo and state_0
         # For some theorems, it might take a few minutes.
         print("Worker", worker_id, "trying to get into critical section")
-        with SystemSemaphore('dojo-enter', 1):
-            print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
-            entered = False
-            try:
-                print("Start entering", theorem)
-                dojo, state_0 = Dojo(theorem).__enter__()
-                entered = True
-                print("Finish entering", theorem)
-            except lean_dojo.interaction.dojo.DojoInitError:
-                print("DojoInitError")
-            #finally:
-            #    semaphore_dojo_enter.release.remote()
-            #
+        entered = False
+        try:
+            with SystemSemaphore('dojoenter1', 1):
+                print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
+                try:
+                    print("Start entering", theorem)
+                    dojo, state_0 = Dojo(theorem).__enter__()
+                    entered = True
+                    print("Finish entering", theorem)
+                except lean_dojo.interaction.dojo.DojoInitError:
+                    print("DojoInitError")
+        except:
+            print("Exception when trying to get into critical section")
         if not entered:
             print("Failed to enter", theorem)
             continue
+        #
         # The main computation
         state_pairs, _ = \
             get_state_provability_data(dojo,
