@@ -350,7 +350,7 @@ def yield_state_pairs(curr_state, leaf_state, state_dict, seen_states_pp, tactic
                     break
     return
 
-@timeout(1800)
+@timeout(3000)
 def get_state_provability_data(dojo,
                                state_0,
                                theorem,
@@ -363,6 +363,7 @@ def get_state_provability_data(dojo,
                                max_steps=100000, 
                                negative_ratio=1.0,
                                verbose=False):
+    MAX_PROVEN_STATES = 2000
     state_dict, theorem_proven, tactic_trace = \
     explore_states(dojo,
                    state_0,
@@ -384,7 +385,8 @@ def get_state_provability_data(dojo,
     state_pairs = []
     seen_state_pps = set()
     #
-    for proven_state in proven_states:
+    for i in range(len(proven_states)):
+        proven_state = proven_states[i]
         #print(proven_state)
         pairs = list(yield_state_pairs(proven_state, proven_state, state_dict, [str(proven_state)], []))
         ancestor_state_dict = {}
@@ -399,6 +401,10 @@ def get_state_provability_data(dojo,
         for ancestor, (distance, tactic) in ancestor_state_dict.items():
             state_pairs.append((ancestor, proven_state, distance, tactic))
             seen_state_pps.add(ancestor.pp)
+        if i % 100 == 0 and i > 0:
+            print(i, "proven states processed")
+        if i > MAX_PROVEN_STATES:
+            break
     #
     num_positive = len(state_pairs)
     # Add negative examples
@@ -448,21 +454,47 @@ def split_path(file_path):
     # Since we've constructed the list from the file up to the root, reverse it
     parts.reverse()
     return parts
+
+def get_all_theorems_processed(folder_path, verbose=True):
+    # Enumerate all .pkl files in the folder
+    output = {}
+    for filename in os.listdir(folder_path):
+        if filename.endswith(".pkl"):
+            found = False
+            file_path = os.path.join(folder_path, filename)
+            fin = open(file_path, 'rb')
+            while True:
+                try:
+                    result = pickle.load(fin)
+                except Exception as e:
+                    break
+                file_path, full_name, theorem, state_pair = result
+                if file_path not in output:
+                    output[file_path] = set()
+                output[file_path].add(full_name)
+                found = True
+            fin.close()
+            if verbose and found:
+                print(filename, len(output[file_path]), "theorems")
+    return output
+
         
 import posix_ipc
 import time
 import threading
 
 class SystemSemaphore:
-    def __init__(self, name, limit, max_hold_time=240):
+    def __init__(self, name, limit, max_hold_time=480):
         self.name = name
         self.limit = limit
         self.max_hold_time = max_hold_time
 
-    @timeout(1200)
     def __enter__(self):
         self.lock = posix_ipc.Semaphore(f'/{self.name}', posix_ipc.O_CREAT, 0x384, self.limit)
         self.lock.acquire()
+#         acquired = self.lock.acquire(self.acquire_timeout)
+#         if not acquired:
+#             raise TimeoutError(f"Failed to acquire semaphore within {self.acquire_timeout} seconds.")
         self.start_time = time.time()
         self.timer = threading.Timer(self.max_hold_time, self.release_semaphore)
         self.timer.start()
@@ -475,12 +507,16 @@ class SystemSemaphore:
         self.lock.release()
         elapsed_time = time.time() - self.start_time
         print(f"Warning: Semaphore was held for {elapsed_time:.2f} seconds, exceeding the maximum hold time of {self.max_hold_time} seconds.")
-        raise TimeoutError(os.strerror(errno.ETIME))
+        #raise FooTimeoutError(os.strerror(errno.ETIME))
         
+
+# @timeout(300)
+# def dojo_enter(theorem):
+#     return Dojo(theorem).__enter__()
 
 
 @ray.remote(num_cpus=1,num_gpus=0.1)
-def compute_provability_training_data_remote(file_path, output_path):
+def compute_provability_training_data_remote(file_path, output_path, previous_output_path=None):
     worker_id = random.randint(0, 100)
     print("Worker", worker_id, "on", file_path)
     cuda_version = subprocess.run(['nvcc', '--version'], capture_output=True, text=True).stdout
@@ -495,6 +531,24 @@ def compute_provability_training_data_remote(file_path, output_path):
     fin = open('/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl', 'rb')
     train_traced_theorems = pickle.load(fin)
     fin.close()
+    #
+    if previous_output_path is not None:
+        print("Getting previously computed theorems")
+        processed_theorems = get_all_theorems_processed(previous_output_path)
+        remaining_traced_theorems = dict()
+        for train_file_path, traced_theorems in train_traced_theorems.items():
+            if train_file_path not in processed_theorems:
+                remaining_traced_theorems[train_file_path] = traced_theorems
+                continue
+            remaining_theorems = dict()
+            for full_name, thm in traced_theorems.items():
+                if full_name not in processed_theorems[train_file_path]:
+                    remaining_theorems[full_name] = thm
+                else:
+                    remaining_theorems = dict()
+            print(train_file_path, len(traced_theorems), "->", len(remaining_theorems))
+            remaining_traced_theorems[train_file_path] = remaining_theorems
+        train_traced_theorems = remaining_traced_theorems
     print("Worker", worker_id, "Done.")
     #
     print("Worker", worker_id, "Loading models...")
@@ -513,25 +567,18 @@ def compute_provability_training_data_remote(file_path, output_path):
     tacs = list(tac_template_freq.keys())
     #
     print("Worker", worker_id, "Computing provability ...")
-    #     compute_provability_training_data(repo,
-    #                                       file_path,
-    #                                       output_path,
-    #                                       train_traced_theorems,
-    #                                       model_state,
-    #                                       tokenizer,
-    #                                       index,
-    #                                       tacs,
-    #                                       
-    #      )
     file_name = get_filename(file_path)
     parts = split_path(file_path)
     output_file_name = '__'.join(parts[2:])
-    fout = open(output_path + output_file_name + '.pkl', 'wb')
+    output_file_path = output_path + output_file_name + '.pkl'
+    print("Writing to", output_file_path)
+    fout = open(output_file_path, 'wb')
     traced_theorems = train_traced_theorems[file_path]
     #
     results = []
     num_theorems_processed = 0
     for full_name, thm in traced_theorems.items():
+        #if full_name != 'IsCoprime.of_mul_right_left': continue
         #theorem = thm.theorem
         theorem_code = thm.comments[0]
         #print('Start Loading Theorem:', full_name, theorem_code)
@@ -544,19 +591,22 @@ def compute_provability_training_data_remote(file_path, output_path):
         print("Worker", worker_id, "trying to get into critical section")
         entered = False
         try:
-            with SystemSemaphore('dojoenter1', 1):
+            with SystemSemaphore('dojoenter5', 1):
                 print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
                 try:
                     print("Start entering", theorem)
-                    dojo, state_0 = Dojo(theorem).__enter__()
+                    dojo, state_0 = Dojo(theorem).__enter__() #dojo_enter(theorem)
                     entered = True
                     print("Finish entering", theorem)
                 except lean_dojo.interaction.dojo.DojoInitError:
                     print("DojoInitError")
-        except:
-            print("Exception when trying to get into critical section")
+        except Exception as e:
+            print("Exception when trying to get into critical section:", e)
         if not entered:
             print("Failed to enter", theorem)
+            result = (file_path, full_name, theorem, None)
+            pickle.dump(result, fout)
+            fout.flush()
             continue
         #
         # The main computation
@@ -573,11 +623,16 @@ def compute_provability_training_data_remote(file_path, output_path):
                                        max_steps=200000,
                                        verbose=True)
         print(len(state_pairs), "state pairs found in", full_name, file_path)
+        if len(state_pairs) == 0:
+            result = (file_path, full_name, theorem, None)
+            pickle.dump(result, fout)
         #
         for state_pair in state_pairs:
             result = (file_path, full_name, theorem, state_pair)
             results.append(result)
             pickle.dump(result, fout)
+        fout.flush()
+        #
         num_theorems_processed += 1
 #         if num_theorems_processed >= 5:
 #             break
@@ -596,7 +651,7 @@ def main() -> int:
     #compute_provability_training_data_remote('.lake/packages/mathlib/Mathlib/Topology/Algebra/Module/Basic.lean', output_folder)
     
     all_file_paths = list(set([x[-1] for x in train_tac_templates]))
-    #all_file_paths = ['.lake/packages/mathlib/Mathlib/Topology/Algebra/Module/Basic.lean']
+    #all_file_paths = ['.lake/packages/mathlib/Mathlib/RingTheory/Coprime/Basic.lean']
     #
     # Set the environment variable to disable log deduplication
     os.environ['RAY_record_all_task_output'] = '1'
@@ -608,7 +663,7 @@ def main() -> int:
     # Start Ray with custom configuration
     ray.init(
         num_gpus=1,
-        num_cpus=10,
+        num_cpus=7,
         _memory=(192 * 1024 * 1024 * 1024),  # For example, limit Ray to 4 GB of RAM
         object_store_memory=(19 * 1024 * 1024 * 1024)  # Set object store memory to 2 GB
     )
@@ -623,9 +678,10 @@ def main() -> int:
     #     "MIL/C02_Basics/solutions/Solutions_S05_Proving_Facts_about_Algebraic_Structures.lean"
     # ]
     output_folder = '/home/mcwave/code/automath/atp/datasets/provability/rag/'
+    previous_output_path = '/home/mcwave/code/automath/atp/datasets/provability/rag_20240613'
 
     # Submit tasks
-    result_ids = [compute_provability_training_data_remote.remote(file_path, output_folder) for file_path in all_file_paths]
+    result_ids = [compute_provability_training_data_remote.remote(file_path, output_folder, previous_output_path) for file_path in all_file_paths]
 
     # Fetch results
     results = ray.get(result_ids)

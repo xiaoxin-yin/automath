@@ -51,13 +51,13 @@ lean_keywords = [
 VARIABLE_PATTERN = r'[a-zA-Z_\'\u03b1-\u03c9][a-zA-Z_\'\u03b1-\u03c9\d₀-₉]*'
 
 
-class TimeoutError(Exception):
+class FooTimeoutError(Exception):
     pass
 
 def timeout(seconds=1, error_message=os.strerror(errno.ETIME)):
     def decorator(func):
         def _handle_timeout(signum, frame):
-            raise TimeoutError(error_message)
+            raise FooTimeoutError(error_message)
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             signal.signal(signal.SIGALRM, _handle_timeout)
