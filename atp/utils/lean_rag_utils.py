@@ -166,7 +166,7 @@ def explore_states(dojo,
                    rag_index,
                    all_tacs, 
                    theorem_code,
-                   traced_tactics=None,
+                   proof_tactics=None,
                    max_steps=MAX_STEPS, 
                    max_time=1200, 
                    exit_on_finish=True,
@@ -192,9 +192,8 @@ def explore_states(dojo,
     state_dict[curr_state.pp] = (curr_state, list(), list())
     
     # Follow traced_tactics and populate state_dict with the authoratative proof
-    if traced_tactics is not None:
-        for traced_tactic in traced_tactics:
-            tactic = traced_tactic.tactic
+    if proof_tactics is not None:
+        for tactic in proof_tactics:
             try:
                 test_state = dojo_run_tac(dojo, curr_state, tactic)
             except:
@@ -359,7 +358,7 @@ def get_state_provability_data(dojo,
                                rag_index, 
                                all_tacs,
                                theorem_code=None, 
-                               traced_tactics=None,
+                               proof_tactics=None,
                                max_steps=100000, 
                                negative_ratio=1.0,
                                verbose=False):
@@ -373,7 +372,7 @@ def get_state_provability_data(dojo,
                    rag_index, 
                    all_tacs,
                    theorem_code=theorem_code, 
-                   traced_tactics=traced_tactics,
+                   proof_tactics=proof_tactics,
                    max_steps=max_steps,
                    exit_on_finish=False,
                    verbose=verbose)
@@ -525,30 +524,35 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
     print("os.environ['LD_LIBRARY_PATH']", os.environ['LD_LIBRARY_PATH'])
     print("Worker", worker_id, "Loading repo...")
     repo = LeanGitRepo(
-        "https://github.com/xiaoxin-yin/math-in-lean",
-        "20077bcd4392317ddb9605404fda3a85e40e8956"
+        #"https://github.com/xiaoxin-yin/math-in-lean",
+        #"20077bcd4392317ddb9605404fda3a85e40e8956"
+        "https://github.com/leanprover-community/mathlib4",
+        "27c6744e1c0e25d676be5eb252cd4b6d30c6acc7",
     )
-    fin = open('/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl', 'rb')
-    train_traced_theorems = pickle.load(fin)
+    #fin = open('/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl', 'rb')
+    #train_traced_theorems = pickle.load(fin)
+    #fin.close()
+    fin = open('/home/mcwave/code/automath/atp/datasets/train_theorems_repo_mathlib4_20240617.pkl', 'rb')
+    train_theorems = pickle.load(fin)
     fin.close()
     #
-    if previous_output_path is not None:
-        print("Getting previously computed theorems")
-        processed_theorems = get_all_theorems_processed(previous_output_path)
-        remaining_traced_theorems = dict()
-        for train_file_path, traced_theorems in train_traced_theorems.items():
-            if train_file_path not in processed_theorems:
-                remaining_traced_theorems[train_file_path] = traced_theorems
-                continue
-            remaining_theorems = dict()
-            for full_name, thm in traced_theorems.items():
-                if full_name not in processed_theorems[train_file_path]:
-                    remaining_theorems[full_name] = thm
-                else:
-                    remaining_theorems = dict()
-            print(train_file_path, len(traced_theorems), "->", len(remaining_theorems))
-            remaining_traced_theorems[train_file_path] = remaining_theorems
-        train_traced_theorems = remaining_traced_theorems
+    #     if previous_output_path is not None:
+    #         print("Getting previously computed theorems")
+    #         processed_theorems = get_all_theorems_processed(previous_output_path)
+    #         remaining_traced_theorems = dict()
+    #         for train_file_path, traced_theorems in train_traced_theorems.items():
+    #             if train_file_path not in processed_theorems:
+    #                 remaining_traced_theorems[train_file_path] = traced_theorems
+    #                 continue
+    #             remaining_theorems = dict()
+    #             for full_name, thm in traced_theorems.items():
+    #                 if full_name not in processed_theorems[train_file_path]:
+    #                     remaining_theorems[full_name] = thm
+    #                 else:
+    #                     remaining_theorems = dict()
+    #             print(train_file_path, len(traced_theorems), "->", len(remaining_theorems))
+    #             remaining_traced_theorems[train_file_path] = remaining_theorems
+    #         train_traced_theorems = remaining_traced_theorems
     print("Worker", worker_id, "Done.")
     #
     print("Worker", worker_id, "Loading models...")
@@ -573,25 +577,22 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
     output_file_path = output_path + output_file_name + '.pkl'
     print("Writing to", output_file_path)
     fout = open(output_file_path, 'wb')
-    traced_theorems = train_traced_theorems[file_path]
+    theorems = train_theorems[file_path]
     #
     results = []
     num_theorems_processed = 0
-    for full_name, thm in traced_theorems.items():
-        #if full_name != 'IsCoprime.of_mul_right_left': continue
-        #theorem = thm.theorem
-        theorem_code = thm.comments[0]
+    for full_name, val in theorems.items():
+        thm, theorem_code, tactics = val
         #print('Start Loading Theorem:', full_name, theorem_code)
-        theorem = Theorem(repo, file_path, full_name)
+        theorem = Theorem(repo, file_path, thm.full_name)
         #print('Finish Loading Theorem:', full_name, theorem_code)
-        traced_tactics = thm.get_traced_tactics()
         #
         # Getting Dojo and state_0
         # For some theorems, it might take a few minutes.
         print("Worker", worker_id, "trying to get into critical section")
         entered = False
         try:
-            with SystemSemaphore('dojoenter6', 1):
+            with SystemSemaphore('dojoenter7', 1):
                 print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
                 try:
                     print("Start entering", theorem)
@@ -619,7 +620,7 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
                                        index,
                                        tacs,
                                        theorem_code=theorem_code,
-                                       traced_tactics=traced_tactics,
+                                       proof_tactics=tactics,
                                        max_steps=200000,
                                        verbose=True)
         print(len(state_pairs), "state pairs found in", full_name, file_path)
@@ -643,14 +644,14 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
 
 
 def main() -> int:
-    fin = open('/home/mcwave/code/automath/atp/datasets/tac_templates_in_files/train_tac_templates.json', 'r')
-    train_tac_templates = json.load(fin)
+    fin = open('/home/mcwave/code/automath/atp/datasets/train_theorems_repo_mathlib4_20240617.pkl', 'rb')
+    train_theorems = pickle.load(fin)
     fin.close()
     
     output_folder = '/home/mcwave/code/automath/atp/datasets/provability/rag/'
     #compute_provability_training_data_remote('.lake/packages/mathlib/Mathlib/Topology/Algebra/Module/Basic.lean', output_folder)
     
-    all_file_paths = list(set([x[-1] for x in train_tac_templates]))
+    all_file_paths = list(train_theorems.keys())
     #all_file_paths = ['.lake/packages/mathlib/Mathlib/RingTheory/Coprime/Basic.lean']
     #
     # Set the environment variable to disable log deduplication
