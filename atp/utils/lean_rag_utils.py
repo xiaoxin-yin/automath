@@ -591,7 +591,7 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
         print("Worker", worker_id, "trying to get into critical section")
         entered = False
         try:
-            with SystemSemaphore('dojoenter5', 1):
+            with SystemSemaphore('dojoenter6', 1):
                 print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
                 try:
                     print("Start entering", theorem)
@@ -663,7 +663,7 @@ def main() -> int:
     # Start Ray with custom configuration
     ray.init(
         num_gpus=1,
-        num_cpus=7,
+        num_cpus=10,
         _memory=(192 * 1024 * 1024 * 1024),  # For example, limit Ray to 4 GB of RAM
         object_store_memory=(19 * 1024 * 1024 * 1024)  # Set object store memory to 2 GB
     )
@@ -678,7 +678,7 @@ def main() -> int:
     #     "MIL/C02_Basics/solutions/Solutions_S05_Proving_Facts_about_Algebraic_Structures.lean"
     # ]
     output_folder = '/home/mcwave/code/automath/atp/datasets/provability/rag/'
-    previous_output_path = '/home/mcwave/code/automath/atp/datasets/provability/rag_20240613'
+    previous_output_path = '/home/mcwave/code/automath/atp/datasets/provability/rag_merged'
 
     # Submit tasks
     result_ids = [compute_provability_training_data_remote.remote(file_path, output_folder, previous_output_path) for file_path in all_file_paths]

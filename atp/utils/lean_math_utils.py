@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import re
@@ -327,6 +328,49 @@ def state_complexity(state):
             n_targets += 1
     return complexity + n_targets - 1
 
+# Save traced_theorems to a pickle file since they are only data we need
+def generate_train_file_theorems(train_tac_templates_path, output_path):
+    fin = open(train_tac_templates_path, 'r')
+    train_tac_templates = json.load(fin)
+    fin.close()
+    #
+    train_file_theorems = {}
+    for i in range(len(train_tac_templates)):
+        full_name = train_tac_templates[i][2]
+        file_path = train_tac_templates[i][3]
+        if file_path not in train_file_theorems:
+            train_file_theorems[file_path] = set()
+        train_file_theorems[file_path].add(full_name)
+    #
+    train_traced_theorems = dict()
+    for file_path, full_names in train_file_theorems.items():
+        traced_file = traced_repo.get_traced_file(file_path)
+        premises = traced_file.get_premise_definitions()
+        results = []
+        for premise in premises:
+            full_name = premise['full_name']
+            if full_name in full_names:
+                thm = traced_file.get_traced_theorem(full_name)
+                thm.comments.insert(0, premise['code'])
+                if file_path not in train_traced_theorems:
+                    train_traced_theorems[file_path] = dict()
+                train_traced_theorems[file_path][full_name] = thm
+    #
+    for file_path, full_names in train_file_theorems.items():
+        if file_path not in train_traced_theorems:
+            print(file_path, "not found!")
+            continue
+        for full_name in full_names:
+            if full_name not in train_traced_theorems[file_path]:
+                print(full_name, "not found in", file_path)
+    #
+    fout = open(output_path, 'wb')
+    pickle.dump(train_traced_theorems, fout)
+    fout.close()
+
+#train_tac_templates_path = '/home/mcwave/code/automath/atp/datasets/tac_templates_in_files/train_tac_templates.json'
+#output_path = '/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl'
+#generate_train_file_theorems(train_tac_templates_path, output_path)
 
 
 
