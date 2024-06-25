@@ -1,11 +1,10 @@
 import os
-import lean_dojo
-from lean_dojo import *
-from utils.lean_math_utils import *
+import logging
 from random import randint
 import random
 import errno
 import functools
+from loguru import logger
 import signal
 import time
 import ray
@@ -15,10 +14,18 @@ import subprocess
 import shutil
 import psutil
 import pickle
+from collections import defaultdict
+from datetime import datetime
+
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from transformers import BertTokenizer, BertModel
+
+import lean_dojo
+from lean_dojo import *
+from utils.lean_math_utils import *
+
 #from memory_profiler import profile
 
 from lean_dojo.interaction.dojo import (
@@ -38,7 +45,7 @@ MAX_STEPS = 100000
 MAX_TACTIC_FROM_TEMPLATE = 50
 PENALTY_SEEN_TARGET_MULTIPLIER = 3
 MAX_NUM_DOJO_ATTEMPT = 2
-
+MAX_NUM_OUTPUT_PER_STATE = 50
 
 class TripletDataset(Dataset):
     def __init__(self, triplets, tokenizer):
@@ -202,7 +209,7 @@ def explore_states(dojo,
                 break
             elif type(test_state) == lean_dojo.interaction.dojo.ProofFinished:
                 state_dict[test_state] = (test_state, [curr_state], [tactic])
-                if verbose: print("Sucessfully followed proof")
+                print("Sucessfully followed proof")
                 break
             else:
                 state_dict[test_state.pp] = (test_state, [curr_state], [tactic])
@@ -258,7 +265,7 @@ def explore_states(dojo,
         for tactic in tactic_set:
             n_steps += 1
             if n_steps % 10000 == 0:
-                print(n_steps, "steps executed")
+                print(f"{n_steps} steps executed")
             if n_steps > max_steps:
                 break
             num_attempt = 0
@@ -277,14 +284,6 @@ def explore_states(dojo,
                 proof_finished = True
                 if verbose and not theorem_proven:
                     print("ProofFinished")
-#                     tactic_trace = get_tactic_trace(curr_state, state_dict) + [(tactic, test_state)]
-#                     for i in range(len(tactic_trace)):
-#                         tactic, state = tactic_trace[i]
-#                         print("STEP", i)
-#                         if tactic != None:
-#                             print("Tactic:", tactic)
-#                         if hasattr(state, 'pp'):
-#                             print(state.pp)
                 if test_state in state_dict:
                     _, parent_states, tactics = state_dict[test_state]
                     state_dict[test_state] = (test_state, parent_states + [curr_state], tactics + [tactic])
@@ -307,19 +306,21 @@ def explore_states(dojo,
         if proof_finished:
             theorem_proven = True
             if exit_on_finish: break
-        if n_steps > max_steps:
+        if n_steps > max_steps or (not theorem_proven and n_steps > max_steps / 3):
             break
         cur_time = time.time()
         if (cur_time - start_time) > max_time:
             print("Max run-time exceeded")
             break
-    #
-    dojo.__exit__(None, None, None)
-    try:
-        shutil.rmtree(dojo.tmp_dir)
-        print(dojo.tmp_dir, "removed successfully.")
-    except Exception as e:
-        print(f"An error occurred when removing tmp dir: {e}")
+    
+    #     try:
+    #         print("Dojo exiting ...")
+    #         dojo.__exit__(None, None, None)
+    #         print("Dojo exited")
+    #         shutil.rmtree(dojo.tmp_dir)
+    #         print(dojo.tmp_dir, "removed successfully.")
+    #     except Exception as e:
+    #         print(f"An error occurred when removing tmp dir: {e}")
     return state_dict, theorem_proven, tactic_trace
 
 # Generate state pairs and their distances. 
@@ -362,7 +363,8 @@ def get_state_provability_data(dojo,
                                max_steps=100000, 
                                negative_ratio=1.0,
                                verbose=False):
-    MAX_PROVEN_STATES = 2000
+    MAX_PROVEN_STATES = 1000
+    print("Start exploring states at", datetime.now().time())
     state_dict, theorem_proven, tactic_trace = \
     explore_states(dojo,
                    state_0,
@@ -378,12 +380,13 @@ def get_state_provability_data(dojo,
                    verbose=verbose)
     #
     all_states = list(state_dict.values())
-    print(len(all_states), "states in total")
+    print(f"{len(all_states)} states in total", datetime.now().time())
     proven_states = [x[0] for x in all_states if type(x[0]) == lean_dojo.interaction.dojo.ProofFinished]
-    print(len(proven_states), "proven states")
+    print(f"{len(proven_states)} proven states")
     state_pairs = []
-    seen_state_pps = set()
+    seen_state_pps = defaultdict(int)
     #
+    random.shuffle(proven_states)
     for i in range(len(proven_states)):
         proven_state = proven_states[i]
         #print(proven_state)
@@ -398,10 +401,11 @@ def get_state_provability_data(dojo,
         #print(ancestor_state_dist)
         #print(len(ancestor_state_dict), "ancestors found")
         for ancestor, (distance, tactic) in ancestor_state_dict.items():
-            state_pairs.append((ancestor, proven_state, distance, tactic))
-            seen_state_pps.add(ancestor.pp)
+            if seen_state_pps[ancestor.pp] < MAX_NUM_OUTPUT_PER_STATE:
+                state_pairs.append((ancestor, proven_state, distance, tactic))
+                seen_state_pps[ancestor.pp] += 1
         if i % 100 == 0 and i > 0:
-            print(i, "proven states processed")
+            print(f"{i} proven states processed")
         if i > MAX_PROVEN_STATES:
             break
     #
@@ -514,145 +518,177 @@ class SystemSemaphore:
 #     return Dojo(theorem).__enter__()
 
 
-@ray.remote(num_cpus=1,num_gpus=0.1)
+@ray.remote(num_cpus=1,num_gpus=0.03)
 def compute_provability_training_data_remote(file_path, output_path, previous_output_path=None):
-    worker_id = random.randint(0, 100)
-    print("Worker", worker_id, "on", file_path)
-    cuda_version = subprocess.run(['nvcc', '--version'], capture_output=True, text=True).stdout
-    print(cuda_version)
-    print("CUDA:", torch.cuda.is_available())
-    print("os.environ['LD_LIBRARY_PATH']", os.environ['LD_LIBRARY_PATH'])
-    print("Worker", worker_id, "Loading repo...")
-    repo = LeanGitRepo(
-        #"https://github.com/xiaoxin-yin/math-in-lean",
-        #"20077bcd4392317ddb9605404fda3a85e40e8956"
-        "https://github.com/leanprover-community/mathlib4",
-        "27c6744e1c0e25d676be5eb252cd4b6d30c6acc7",
-    )
-    #fin = open('/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl', 'rb')
-    #train_traced_theorems = pickle.load(fin)
-    #fin.close()
-    fin = open('/home/mcwave/code/automath/atp/datasets/train_theorems_repo_mathlib4_20240617.pkl', 'rb')
-    train_theorems = pickle.load(fin)
-    fin.close()
-    #
-    #     if previous_output_path is not None:
-    #         print("Getting previously computed theorems")
-    #         processed_theorems = get_all_theorems_processed(previous_output_path)
-    #         remaining_traced_theorems = dict()
-    #         for train_file_path, traced_theorems in train_traced_theorems.items():
-    #             if train_file_path not in processed_theorems:
-    #                 remaining_traced_theorems[train_file_path] = traced_theorems
-    #                 continue
-    #             remaining_theorems = dict()
-    #             for full_name, thm in traced_theorems.items():
-    #                 if full_name not in processed_theorems[train_file_path]:
-    #                     remaining_theorems[full_name] = thm
-    #                 else:
-    #                     remaining_theorems = dict()
-    #             print(train_file_path, len(traced_theorems), "->", len(remaining_theorems))
-    #             remaining_traced_theorems[train_file_path] = remaining_theorems
-    #         train_traced_theorems = remaining_traced_theorems
-    print("Worker", worker_id, "Done.")
-    #
-    print("Worker", worker_id, "Loading models...")
-    # Load pre-trained BERT tokenizer and model
-    tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    model_state = torch.load('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/bert_embeder_state-batch64-60k-loss0047.model')
-    #model_tac   = torch.load('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/bert_embeder_tac-batch64-60k-loss0047.model')
-    device = model_state.device
-    print(device)
-    #
-    print("Worker", worker_id, "Loading faiss index ...")
-    index = faiss.read_index('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/faiss_index_bert_embeds-batch64-60k-loss0047.idx')
-    fin = open('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/tac_template_freq.json', 'r')
-    tac_template_freq = json.load(fin)
-    fin.close()
-    tacs = list(tac_template_freq.keys())
-    #
-    print("Worker", worker_id, "Computing provability ...")
-    file_name = get_filename(file_path)
-    parts = split_path(file_path)
-    output_file_name = '__'.join(parts[2:])
-    output_file_path = output_path + output_file_name + '.pkl'
-    print("Writing to", output_file_path)
-    fout = open(output_file_path, 'wb')
-    theorems = train_theorems[file_path]
-    #
-    results = []
-    num_theorems_processed = 0
-    for full_name, val in theorems.items():
-        thm, theorem_code, tactics = val
-        #print('Start Loading Theorem:', full_name, theorem_code)
-        theorem = Theorem(repo, file_path, thm.full_name)
-        #print('Finish Loading Theorem:', full_name, theorem_code)
+    try:
+        worker_id = random.randint(0, 100)
+        print("Worker", worker_id, "on", file_path)
+        cuda_version = subprocess.run(['nvcc', '--version'], capture_output=True, text=True).stdout
+        print(cuda_version)
+        print("CUDA:", torch.cuda.is_available())
+        print("os.environ['LD_LIBRARY_PATH']", os.environ['LD_LIBRARY_PATH'])
+        print("Worker", worker_id, "Loading repo...")
+        repo = LeanGitRepo(
+            #"https://github.com/xiaoxin-yin/math-in-lean",
+            #"20077bcd4392317ddb9605404fda3a85e40e8956"
+            "https://github.com/leanprover-community/mathlib4",
+            "27c6744e1c0e25d676be5eb252cd4b6d30c6acc7",
+        )
+        #fin = open('/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl', 'rb')
+        #train_traced_theorems = pickle.load(fin)
+        #fin.close()
+        fin = open('/home/mcwave/code/automath/atp/datasets/remaining_theorems_repo_mathlib4_20240617.pkl', 'rb')
+        train_theorems = pickle.load(fin)
+        fin.close()
         #
-        # Getting Dojo and state_0
-        # For some theorems, it might take a few minutes.
-        print("Worker", worker_id, "trying to get into critical section")
-        entered = False
-        try:
-            with SystemSemaphore('dojoenter7', 1):
-                print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
+        #     if previous_output_path is not None:
+        #         print("Getting previously computed theorems")
+        #         processed_theorems = get_all_theorems_processed(previous_output_path)
+        #         remaining_traced_theorems = dict()
+        #         for train_file_path, traced_theorems in train_traced_theorems.items():
+        #             if train_file_path not in processed_theorems:
+        #                 remaining_traced_theorems[train_file_path] = traced_theorems
+        #                 continue
+        #             remaining_theorems = dict()
+        #             for full_name, thm in traced_theorems.items():
+        #                 if full_name not in processed_theorems[train_file_path]:
+        #                     remaining_theorems[full_name] = thm
+        #                 else:
+        #                     remaining_theorems = dict()
+        #             print(train_file_path, len(traced_theorems), "->", len(remaining_theorems))
+        #             remaining_traced_theorems[train_file_path] = remaining_theorems
+        #         train_traced_theorems = remaining_traced_theorems
+        #
+        print("Worker", worker_id, "Loading models...")
+        # Load pre-trained BERT tokenizer and model
+        tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+        model_state = torch.load('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/bert_embeder_state-batch64-60k-loss0047.model')
+        #model_tac   = torch.load('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/bert_embeder_tac-batch64-60k-loss0047.model')
+        device = model_state.device
+        print(device)
+        #
+        print("Worker", worker_id, "Loading faiss index ...")
+        index = faiss.read_index('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/faiss_index_bert_embeds-batch64-60k-loss0047.idx')
+        fin = open('/home/mcwave/code/automath/atp/datasets/rag_tactic_templates/tac_template_freq.json', 'r')
+        tac_template_freq = json.load(fin)
+        fin.close()
+        tacs = list(tac_template_freq.keys())
+        #
+        print("Worker", worker_id, "Computing provability ...")
+        file_name = get_filename(file_path)
+        parts = split_path(file_path)
+        output_file_name = '__'.join(parts)
+        output_file_path = output_path + output_file_name + '.pkl'
+        print("Writing to", output_file_path)
+        fout = open(output_file_path, 'wb')
+        theorems = train_theorems[file_path]
+        #
+        results = []
+        num_theorems_processed = 0
+        dojo = None
+        for full_name, val in theorems.items():
+            thm, theorem_code, tactics = val
+            print("TACTICS:", tactics)
+            #print('Start Loading Theorem:', full_name, theorem_code)
+            theorem = Theorem(repo, file_path, thm.full_name)
+            #print('Finish Loading Theorem:', full_name, theorem_code)
+            #
+            # Getting Dojo and state_0
+            # For some theorems, it might take a few minutes.
+            print("Worker", worker_id, "trying to enter theorem", theorem)
+            entered = False
+            if dojo is None:
                 try:
-                    print("Start entering", theorem)
-                    dojo, state_0 = Dojo(theorem).__enter__() #dojo_enter(theorem)
+                    print("Worker", worker_id, "trying to get into critical section", datetime.now().time())
+                    with SystemSemaphore('dojolock1', 1):
+                        print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
+                        try:
+                            print("Start entering", theorem)
+                            dojo, state_0 = Dojo(theorem, copy_tree_on_enter=False).__enter__() #dojo_enter(theorem)
+                            entered = True
+                            print("Finish entering", theorem)
+                        except lean_dojo.interaction.dojo.DojoInitError:
+                            print("DojoInitError")
+                except Exception as e:
+                    print("Exception when trying to get into critical section:", e)
+            else:
+                try:
+                    print(f"Continue entering {theorem} at {datetime.now().time()}")
+                    dojo.entry = theorem
+                    _, state_0 = dojo.__enter__()
                     entered = True
-                    print("Finish entering", theorem)
-                except lean_dojo.interaction.dojo.DojoInitError:
-                    print("DojoInitError")
-        except Exception as e:
-            print("Exception when trying to get into critical section:", e)
-        if not entered:
-            print("Failed to enter", theorem)
-            result = (file_path, full_name, theorem, None)
-            pickle.dump(result, fout)
+                    print(f"Finish entering {theorem}")
+                except Exception as e:
+                    print("Exception when entering theorem:", e)
+            if not entered:
+                print(f"Failed to enter {theorem}")
+                result = (file_path, full_name, theorem, None)
+                pickle.dump(result, fout)
+                fout.flush()
+                continue
+            #
+            # The main computation
+            state_pairs, _ = \
+                get_state_provability_data(dojo,
+                                           state_0,
+                                           theorem,
+                                           model_state,
+                                           tokenizer,
+                                           index,
+                                           tacs,
+                                           theorem_code=theorem_code,
+                                           proof_tactics=tactics,
+                                           max_steps=60000,
+                                           verbose=True)
+            print(f"{len(state_pairs)} state pairs found in {full_name}, {file_path}")
+            if len(state_pairs) == 0:
+                result = (file_path, full_name, theorem, None)
+                pickle.dump(result, fout)
+            #
+            for state_pair in state_pairs:
+                result = (file_path, full_name, theorem, state_pair)
+                results.append(result)
+                pickle.dump(result, fout)
             fout.flush()
-            continue
+            #
+            num_theorems_processed += 1
         #
-        # The main computation
-        state_pairs, _ = \
-            get_state_provability_data(dojo,
-                                       state_0,
-                                       theorem,
-                                       model_state,
-                                       tokenizer,
-                                       index,
-                                       tacs,
-                                       theorem_code=theorem_code,
-                                       proof_tactics=tactics,
-                                       max_steps=200000,
-                                       verbose=True)
-        print(len(state_pairs), "state pairs found in", full_name, file_path)
-        if len(state_pairs) == 0:
-            result = (file_path, full_name, theorem, None)
-            pickle.dump(result, fout)
+        # Processed all theorems in this file_path
+        fout.close()
+        logger.info(f"Finished processing {file_path}, Returning {len(results)}")
+        try:
+            logger.info("Dojo exiting ...")
+            dojo.__exit__(None, None, None)
+            logger.info("Dojo exited")
+            shutil.rmtree(dojo.tmp_dir)
+            logger.info(f"{dojo.tmp_dir} removed successfully.")
+        except Exception as e:
+            logger.info(f"An error occurred when removing tmp dir: {e}")
         #
-        for state_pair in state_pairs:
-            result = (file_path, full_name, theorem, state_pair)
-            results.append(result)
-            pickle.dump(result, fout)
-        fout.flush()
-        #
-        num_theorems_processed += 1
-#         if num_theorems_processed >= 5:
-#             break
-    #
-    fout.close()
-    return len(results)
+        return len(results)
+    except Exception as e:
+        logger.info(str(e))
+        return 0
 
 
 
 def main() -> int:
-    fin = open('/home/mcwave/code/automath/atp/datasets/train_theorems_repo_mathlib4_20240617.pkl', 'rb')
+    #random.seed(1)
+    
+    fin = open('/home/mcwave/code/automath/atp/datasets/remaining_theorems_repo_mathlib4_20240617.pkl', 'rb')
     train_theorems = pickle.load(fin)
     fin.close()
     
     output_folder = '/home/mcwave/code/automath/atp/datasets/provability/rag/'
     #compute_provability_training_data_remote('.lake/packages/mathlib/Mathlib/Topology/Algebra/Module/Basic.lean', output_folder)
     
-    all_file_paths = list(train_theorems.keys())
-    #all_file_paths = ['.lake/packages/mathlib/Mathlib/RingTheory/Coprime/Basic.lean']
+    all_file_paths = [] 
+    for file_path, theorems in train_theorems.items():
+        if theorems is not None and len(theorems) > 0:
+            all_file_paths.append(file_path)
+    random.shuffle(all_file_paths)
+    
+    #all_file_paths = ['Mathlib/MeasureTheory/Function/EssSup.lean']
     #
     # Set the environment variable to disable log deduplication
     os.environ['RAY_record_all_task_output'] = '1'
@@ -662,27 +698,19 @@ def main() -> int:
         ray.shutdown()
     #
     # Start Ray with custom configuration
+    #logging.basicConfig(level=logging.ERROR, filename='datasets/ray_logs.log')
     ray.init(
         num_gpus=1,
-        num_cpus=10,
+        num_cpus=30,
         _memory=(192 * 1024 * 1024 * 1024),  # For example, limit Ray to 4 GB of RAM
-        object_store_memory=(19 * 1024 * 1024 * 1024)  # Set object store memory to 2 GB
+        object_store_memory=(6 * 1024 * 1024 * 1024),  # Set object store memory to 2 GB
+        #logging_level=logging.ERROR,
+        #log_to_driver=True
     )
-    # Only one process can run Dojo(theorem).__enter__ at a time.
-    #semaphore_dojo_enter = Semaphore.remote(1)
-    #
-    # all_file_paths = [
-    #     "MIL/C02_Basics/solutions/Solutions_S01_Calculating.lean",
-    #     "MIL/C02_Basics/solutions/Solutions_S02_Proving_Identities_in_Algebraic_Structures.lean",
-    #     "MIL/C02_Basics/solutions/Solutions_S03_Using_Theorems_and_Lemmas.lean",
-    #     "MIL/C02_Basics/solutions/Solutions_S04_More_on_Order_and_Divisibility.lean",
-    #     "MIL/C02_Basics/solutions/Solutions_S05_Proving_Facts_about_Algebraic_Structures.lean"
-    # ]
     output_folder = '/home/mcwave/code/automath/atp/datasets/provability/rag/'
-    previous_output_path = '/home/mcwave/code/automath/atp/datasets/provability/rag_merged'
 
     # Submit tasks
-    result_ids = [compute_provability_training_data_remote.remote(file_path, output_folder, previous_output_path) for file_path in all_file_paths]
+    result_ids = [compute_provability_training_data_remote.remote(file_path, output_folder) for file_path in all_file_paths]
 
     # Fetch results
     results = ray.get(result_ids)
@@ -693,6 +721,9 @@ def main() -> int:
     # Display results
     print(results)
 
-
+# nohup python utils/lean_rag_utils.py > datasets/test_log.txt 2>&1 &
+# 
+    
 if __name__ == '__main__':
     sys.exit(main())  # next section explains the use of sys.exit
+    
