@@ -196,7 +196,9 @@ def explore_states(dojo,
     base_complexity = 0
     state_queue.push(curr_state, explore_state_complexity(curr_state, base_complexity=base_complexity) + randint(0, 4))
     base_complexity += 1
-    state_dict[curr_state.pp] = (curr_state, list(), list())
+    
+    # State graph: Key is state.pp (or ProofFinished state). Value is (state, [parent states], [tactic for each parent state], path from state_0 to state)
+    state_dict[curr_state.pp] = (curr_state, list(), list(), list())
     
     # Follow traced_tactics and populate state_dict with the authoratative proof
     if proof_tactics is not None:
@@ -208,11 +210,13 @@ def explore_states(dojo,
             if type(test_state) in [LeanError,TimeoutError,TacticResult,DojoCrashError,DojoHardTimeoutError,DojoInitError,ProofGivenUp]:
                 break
             elif type(test_state) == lean_dojo.interaction.dojo.ProofFinished:
-                state_dict[test_state] = (test_state, [curr_state], [tactic])
-                print("Sucessfully followed proof")
+                state_dict[test_state] = (test_state, [curr_state], [tactic], state_dict[curr_state.pp][3] + [tactic])
+                print("Successfully followed proof")
                 break
             else:
-                state_dict[test_state.pp] = (test_state, [curr_state], [tactic])
+#                 print("CURR_STATE", curr_state)
+#                 print("CURR_STATE_2", state_dict[curr_state.pp])
+                state_dict[test_state.pp] = (test_state, [curr_state], [tactic], state_dict[curr_state.pp][3] + [tactic]) #store shortest path from state_0
                 curr_state = test_state
     
     n_steps = 0
@@ -285,23 +289,32 @@ def explore_states(dojo,
                 if verbose and not theorem_proven:
                     print("ProofFinished")
                 if test_state in state_dict:
-                    _, parent_states, tactics = state_dict[test_state]
-                    state_dict[test_state] = (test_state, parent_states + [curr_state], tactics + [tactic])
+                    _, parent_states, tactics, prefix = state_dict[test_state]
+                    prefix += [tactic]
+                    state_dict[test_state] = (test_state, parent_states + [curr_state], tactics + [tactic], prefix)
+                    prefix_2 = state_dict[curr_state.pp][3] + [tactic]
+                    if len(prefix_2) < len(prefix):
+                        state_dict[test_state][3] = prefix_2
                 else:
                     complexity = 100000000
                     state_queue.push(test_state, complexity)
-                    state_dict[test_state] = (test_state, [curr_state], [tactic])
+                    state_dict[test_state] = (test_state, [curr_state], [tactic], state_dict[curr_state.pp][3] + [tactic])
                 if exit_on_finish: break
             else:
                 #print("TAC:", tactic, "STATE:", test_state.pp)
                 if test_state.pp in state_dict:
-                    _, parent_states, tactics = state_dict[test_state.pp]
-                    state_dict[test_state.pp] = (test_state, parent_states + [curr_state], tactics + [tactic])
+                    _, parent_states, tactics, prefix = state_dict[test_state.pp]
+                    prefix += [tactic]
+                    print("tactics", tactics, [tactic], prefix)
+                    state_dict[test_state.pp] = (test_state, parent_states + [curr_state], tactics + [tactic], prefix)
+                    prefix_2 = state_dict[curr_state.pp][3] + [tactic]
+                    if len(prefix_2) < len(prefix):
+                        state_dict[test_state][3] = prefix_2
                 else:
                     complexity = explore_state_complexity(test_state, base_complexity=base_complexity)
                     base_complexity += 1
                     state_queue.push(test_state, complexity  + randint(0, 4))
-                    state_dict[test_state.pp] = (test_state, [curr_state], [tactic])
+                    state_dict[test_state.pp] = (test_state, [curr_state], [tactic], state_dict[curr_state.pp][3] + [tactic])
         #
         if proof_finished:
             theorem_proven = True
@@ -364,7 +377,8 @@ def get_state_provability_data(dojo,
                                negative_ratio=1.0,
                                verbose=False):
     MAX_PROVEN_STATES = 1000
-    print("Start exploring states at", datetime.now().time())
+    start_time = datetime.now()
+    print("Start exploring states at", start_time.time())
     state_dict, theorem_proven, tactic_trace = \
     explore_states(dojo,
                    state_0,
@@ -378,14 +392,13 @@ def get_state_provability_data(dojo,
                    max_steps=max_steps,
                    exit_on_finish=False,
                    verbose=verbose)
-    #
     all_states = list(state_dict.values())
     print(f"{len(all_states)} states in total", datetime.now().time())
     proven_states = [x[0] for x in all_states if type(x[0]) == lean_dojo.interaction.dojo.ProofFinished]
     print(f"{len(proven_states)} proven states")
     state_pairs = []
     seen_state_pps = defaultdict(int)
-    #
+
     random.shuffle(proven_states)
     for i in range(len(proven_states)):
         proven_state = proven_states[i]
@@ -404,6 +417,8 @@ def get_state_provability_data(dojo,
             if seen_state_pps[ancestor.pp] < MAX_NUM_OUTPUT_PER_STATE:
                 state_pairs.append((ancestor, proven_state, distance, tactic))
                 seen_state_pps[ancestor.pp] += 1
+            if (datetime.now() - start_time).seconds > 2900:
+                return state_pairs, state_dict
         if i % 100 == 0 and i > 0:
             print(f"{i} proven states processed")
         if i > MAX_PROVEN_STATES:
@@ -420,6 +435,8 @@ def get_state_provability_data(dojo,
                 num_negative += 1
                 if num_negative >= num_positive * negative_ratio:
                     break
+                if (datetime.now() - start_time).seconds > 2900:
+                    return state_pairs, state_dict
     return state_pairs, state_dict
 
 
@@ -537,7 +554,7 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
         #fin = open('/home/mcwave/code/automath/atp/datasets/train_traced_theorems_repo_math_in_lean.pkl', 'rb')
         #train_traced_theorems = pickle.load(fin)
         #fin.close()
-        fin = open('/home/mcwave/code/automath/atp/datasets/remaining_theorems_repo_mathlib4_20240617.pkl', 'rb')
+        fin = open('/home/mcwave/code/automath/atp/datasets/train_theorems_repo_mathlib4_20240617.pkl', 'rb')
         train_theorems = pickle.load(fin)
         fin.close()
         #
@@ -587,6 +604,7 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
         num_theorems_processed = 0
         dojo = None
         for full_name, val in theorems.items():
+            print("val_test", val)
             thm, theorem_code, tactics = val
             print("TACTICS:", tactics)
             #print('Start Loading Theorem:', full_name, theorem_code)
@@ -600,7 +618,7 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
             if dojo is None:
                 try:
                     print("Worker", worker_id, "trying to get into critical section", datetime.now().time())
-                    with SystemSemaphore('dojolock1', 1):
+                    with SystemSemaphore('dojolock22', 1):
                         print("Worker", worker_id, f'Process {os.getpid()} has exclusive access to the critical section!')
                         try:
                             print("Start entering", theorem)
@@ -675,7 +693,7 @@ def compute_provability_training_data_remote(file_path, output_path, previous_ou
 def main() -> int:
     #random.seed(1)
     
-    fin = open('/home/mcwave/code/automath/atp/datasets/remaining_theorems_repo_mathlib4_20240617.pkl', 'rb')
+    fin = open('/home/mcwave/code/automath/atp/datasets/train_theorems_repo_mathlib4_20240617.pkl', 'rb')
     train_theorems = pickle.load(fin)
     fin.close()
     
@@ -701,7 +719,7 @@ def main() -> int:
     #logging.basicConfig(level=logging.ERROR, filename='datasets/ray_logs.log')
     ray.init(
         num_gpus=1,
-        num_cpus=30,
+        num_cpus=2,
         _memory=(192 * 1024 * 1024 * 1024),  # For example, limit Ray to 4 GB of RAM
         object_store_memory=(6 * 1024 * 1024 * 1024),  # Set object store memory to 2 GB
         #logging_level=logging.ERROR,
