@@ -1,0 +1,5 @@
+
+It is strongly recommended to train Gemma2 models with the `eager` attention implementation instead of `sdpa`. Use `eager` with `AutoModelForCausalLM.from_pretrained('<path-to-checkpoint>', attn_implementation='eager')`.
+[34m[1mwandb[39m[22m: 500 encountered ({"error":"driver: bad connection"}), retrying request
+[34m[1mwandb[39m[22m: Network error resolved after 0:04:25.528302, resuming normal operation.
+KeyboardInterrupt

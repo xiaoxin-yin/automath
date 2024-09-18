@@ -1,0 +1,147 @@
+{
+    "os": "Linux-5.4.0-150-generic-x86_64-with-glibc2.27",
+    "python": "3.10.13",
+    "heartbeatAt": "2024-09-03T03:18:49.344366",
+    "startedAt": "2024-09-03T03:18:48.718324",
+    "docker": null,
+    "cuda": null,
+    "args": [],
+    "state": "running",
+    "program": "<python with no main file>",
+    "codePathLocal": null,
+    "git": {
+        "remote": "https://github.com/xiaoxin-yin/automath",
+        "commit": "e03a522a9a1f2b5d7283fa222f37714d05d6f0c4"
+    },
+    "email": "xiaoxin@gmail.com",
+    "root": "/home/mcwave/code/automath",
+    "host": "mcwave2",
+    "username": "mcwave",
+    "executable": "/home/mcwave/anaconda3/envs/atp/bin/python",
+    "cpu_count": 12,
+    "cpu_count_logical": 20,
+    "cpu_freq": {
+        "current": 0.76215,
+        "min": 800.0,
+        "max": 5820.0
+    },
+    "cpu_freq_per_core": [
+        {
+            "current": 0.658,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.997,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.598,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.774,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.63,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.986,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.709,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.72,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.695,
+            "min": 800.0,
+            "max": 6400.0
+        },
+        {
+            "current": 0.895,
+            "min": 800.0,
+            "max": 6400.0
+        },
+        {
+            "current": 0.691,
+            "min": 800.0,
+            "max": 6400.0
+        },
+        {
+            "current": 0.612,
+            "min": 800.0,
+            "max": 6400.0
+        },
+        {
+            "current": 0.753,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.84,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.682,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.805,
+            "min": 800.0,
+            "max": 6300.0
+        },
+        {
+            "current": 0.799,
+            "min": 800.0,
+            "max": 3800.0
+        },
+        {
+            "current": 0.799,
+            "min": 800.0,
+            "max": 3800.0
+        },
+        {
+            "current": 0.8,
+            "min": 800.0,
+            "max": 3800.0
+        },
+        {
+            "current": 0.8,
+            "min": 800.0,
+            "max": 3800.0
+        }
+    ],
+    "disk": {
+        "/": {
+            "total": 3665.956069946289,
+            "used": 1814.0603256225586
+        }
+    },
+    "gpu": "NVIDIA RTX A6000",
+    "gpu_count": 1,
+    "gpu_devices": [
+        {
+            "name": "NVIDIA RTX A6000",
+            "memory_total": 51527024640
+        }
+    ],
+    "memory": {
+        "total": 188.49420166015625
+    }
+}
